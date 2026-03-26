@@ -1,0 +1,34 @@
+{
+  "name": "imgx-clone",
+  "version": "1.0.0",
+  "description": "High-performance image processing service for Nuxt Image",
+  "module": "index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun --watch index.ts",
+    "build": "bun build index.ts --outdir ./dist --target bun",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "keywords": [
+    "image-processing",
+    "imgx",
+    "nuxt-image",
+    "sharp",
+    "bun",
+    "cloudrun"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.11",
+    "hono": "^4.12.9",
+    "sharp": "^0.34.5"
+  }
+}
