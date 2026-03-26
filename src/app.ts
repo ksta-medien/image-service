@@ -1,17 +1,43 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
+import { Storage } from '@google-cloud/storage';
 import { ImageProcessor } from './image-processor';
 import type { ImageProcessingParams } from './types';
 
 const app = new Hono();
 
 // Configuration
+const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME || 'livingdocs-image-live';
 const GCS_BUCKET_BASE_URL = process.env.GCS_BUCKET_BASE_URL ||
   'https://storage.cloud.google.com/livingdocs-image-live';
 
+// Initialize Google Cloud Storage client
+const storage = new Storage();
+const bucket = storage.bucket(GCS_BUCKET_NAME);
+
 /**
- * Build full GCS URL from path
+ * Fetch image from GCS bucket with authentication
+ */
+async function fetchImageFromGCS(imagePath: string): Promise<Buffer> {
+  // Remove leading slash if present
+  const cleanPath = imagePath.startsWith('/') ? imagePath.slice(1) : imagePath;
+
+  console.log(`Fetching image from GCS: gs://${GCS_BUCKET_NAME}/${cleanPath}`);
+
+  try {
+    const file = bucket.file(cleanPath);
+    const [buffer] = await file.download();
+    console.log(`Successfully downloaded image: ${buffer.length} bytes`);
+    return buffer;
+  } catch (error) {
+    console.error(`Failed to download from GCS:`, error);
+    throw new Error(`Failed to download image from GCS: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+/**
+ * Build full GCS URL from path (for fallback)
  */
 function buildImageUrl(pathOrUrl: string): string {
   // If it's already a full URL, return as-is
@@ -62,30 +88,15 @@ app.get('/:path{.+\\.(jpg|jpeg|png|webp|avif)}', async (c) => {
       return c.json({ error: 'Quality must be between 1 and 100' }, 400);
     }
 
-    // Build full image URL
-    const imageUrl = buildImageUrl(imagePath);
-    console.log(`Fetching image from: ${imageUrl}`);
-
-    // Fetch the source image
+    // Fetch the source image from GCS
     let imageBuffer: Buffer;
     try {
-      const response = await fetch(imageUrl);
-      if (!response.ok) {
-        console.error(`Failed to fetch image: ${response.status} ${response.statusText} from ${imageUrl}`);
-        return c.json({
-          error: `Failed to fetch image: ${response.statusText}`,
-          url: imageUrl,
-          status: response.status
-        }, 502);
-      }
-      const arrayBuffer = await response.arrayBuffer();
-      imageBuffer = Buffer.from(arrayBuffer);
-      console.log(`Successfully fetched image: ${imageBuffer.length} bytes`);
+      imageBuffer = await fetchImageFromGCS(imagePath);
     } catch (fetchError) {
-      console.error(`Fetch error for ${imageUrl}:`, fetchError);
+      console.error(`Failed to fetch image from GCS:`, fetchError);
       return c.json({
         error: `Failed to fetch image: ${fetchError instanceof Error ? fetchError.message : 'Unknown error'}`,
-        url: imageUrl
+        path: imagePath
       }, 502);
     }
 
@@ -146,18 +157,22 @@ app.get('/image', async (c) => {
       return c.json({ error: 'Quality must be between 1 and 100' }, 400);
     }
 
-    // Build full URL if it's a path
-    const imageUrl = buildImageUrl(sourceUrl);
-
-    // Fetch the source image
+    // Fetch the source image from GCS
     let imageBuffer: Buffer;
     try {
-      const response = await fetch(imageUrl);
-      if (!response.ok) {
-        return c.json({ error: `Failed to fetch image: ${response.statusText}` }, 502);
+      // Check if it's a full URL or a path
+      if (sourceUrl.startsWith('http://') || sourceUrl.startsWith('https://')) {
+        // External URL - use fetch
+        const response = await fetch(sourceUrl);
+        if (!response.ok) {
+          return c.json({ error: `Failed to fetch image: ${response.statusText}` }, 502);
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        imageBuffer = Buffer.from(arrayBuffer);
+      } else {
+        // GCS path - use authenticated download
+        imageBuffer = await fetchImageFromGCS(sourceUrl);
       }
-      const arrayBuffer = await response.arrayBuffer();
-      imageBuffer = Buffer.from(arrayBuffer);
     } catch (fetchError) {
       return c.json({
         error: `Failed to fetch image: ${fetchError instanceof Error ? fetchError.message : 'Unknown error'}`
