@@ -1,13 +1,14 @@
 FROM node:20-slim AS base
 
 # Install dependencies for sharp (image processing library)
-# Including support for AVIF, WebP, JPEG, PNG
+# Including support for AVIF, WebP, JPEG, PNG, and face detection
 RUN apt-get update && apt-get install -y \
     python3 \
     make \
     g++ \
     libvips-dev \
     libvips-tools \
+    libopencv-dev \
     curl \
     unzip \
     && rm -rf /var/lib/apt/lists/*
