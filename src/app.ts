@@ -96,7 +96,7 @@ app.get('/:path{.+\\.(jpg|jpeg|png|webp|avif)}', async (c) => {
     c.header('Content-Type', contentType);
     c.header('Cache-Control', 'public, max-age=31536000, immutable');
     
-    return c.body(processedImage);
+    return c.body(processedImage as unknown as string);
   } catch (error) {
     console.error('Image processing error:', error);
     return c.json({ 
@@ -160,7 +160,7 @@ app.get('/image', async (c) => {
     c.header('Content-Type', contentType);
     c.header('Cache-Control', 'public, max-age=31536000, immutable');
     
-    return c.body(processedImage);
+    return c.body(processedImage as unknown as string);
   } catch (error) {
     console.error('Image processing error:', error);
     return c.json({ 
@@ -189,7 +189,7 @@ app.get('/proxy', async (c) => {
     c.header('Content-Type', contentType);
     c.header('Cache-Control', 'public, max-age=31536000, immutable');
     
-    return c.body(Buffer.from(arrayBuffer));
+    return c.body(Buffer.from(arrayBuffer) as unknown as string);
   } catch (error) {
     console.error('Proxy error:', error);
     return c.json({ 

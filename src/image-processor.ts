@@ -1,4 +1,5 @@
-import sharp, { Sharp, FitEnum } from 'sharp';
+import sharp from 'sharp';
+import type { Sharp, FitEnum } from 'sharp';
 import type { ImageProcessingParams, ParsedRect, ParsedAspectRatio } from './types';
 
 export class ImageProcessor {
@@ -92,7 +93,7 @@ export class ImageProcessor {
   /**
    * Get sharp strategy for smart cropping
    */
-  private getCropStrategy(crop?: string): sharp.Strategy {
+  private getCropStrategy(crop?: string) {
     if (!crop) {
       return sharp.strategy.attention;
     }
