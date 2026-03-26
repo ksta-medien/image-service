@@ -1,21 +1,28 @@
-FROM oven/bun:1-alpine AS base
+FROM node:20-slim AS base
 
 # Install dependencies for sharp (image processing library)
 # Including support for AVIF, WebP, JPEG, PNG
-RUN apk add --no-cache \
-    libc6-compat \
+RUN apt-get update && apt-get install -y \
     python3 \
     make \
     g++ \
-    vips-dev \
-    vips-heif \
-    libheif
+    libvips-dev \
+    libvips-tools \
+    curl \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Bun
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
 
 WORKDIR /app
 
 # Install dependencies
 COPY package.json bun.lockb ./
-RUN bun install --frozen-lockfile --production
+
+# Install dependencies with npm to ensure sharp is properly built
+RUN npm install --production
 
 # Copy source code
 COPY . .

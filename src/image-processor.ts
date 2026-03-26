@@ -4,12 +4,15 @@ import type { ImageProcessingParams, ParsedRect, ParsedAspectRatio } from './typ
 
 export class ImageProcessor {
   private sharp: Sharp;
+  private originalBuffer: Buffer;
 
   constructor(imageBuffer: Buffer) {
+    this.originalBuffer = imageBuffer;
     // Force sharp to detect the format and handle various image types
+    // Don't set failOnError to false as it might hide real errors
     this.sharp = sharp(imageBuffer, {
-      failOnError: false,
-      unlimited: true
+      unlimited: true,
+      sequentialRead: true
     });
   }
 
@@ -120,21 +123,31 @@ export class ImageProcessor {
    */
   async process(params: ImageProcessingParams): Promise<Buffer> {
     try {
-      // Verify the image can be read
-      const metadata = await this.sharp.metadata();
-      console.log('Image metadata:', {
-        format: metadata.format,
-        width: metadata.width,
-        height: metadata.height,
-        space: metadata.space,
-        channels: metadata.channels,
-        hasAlpha: metadata.hasAlpha
-      });
+      // Verify the image can be read and get metadata
+      let metadata;
+      try {
+        metadata = await this.sharp.metadata();
+        console.log('Image metadata:', {
+          format: metadata.format,
+          width: metadata.width,
+          height: metadata.height,
+          space: metadata.space,
+          channels: metadata.channels,
+          hasAlpha: metadata.hasAlpha,
+          size: metadata.size
+        });
+      } catch (metadataError) {
+        console.error('Failed to read image metadata:', metadataError);
+        console.error('Buffer size:', this.originalBuffer.length);
+        console.error('Buffer start (hex):', this.originalBuffer.slice(0, 16).toString('hex'));
+        throw new Error(`Cannot read image metadata: ${metadataError instanceof Error ? metadataError.message : 'Unknown error'}`);
+      }
 
       // Step 1: Apply source rectangle crop if specified
       if (params.rect) {
         const rect = this.parseRect(params.rect);
         if (rect) {
+          console.log('Applying rect crop:', rect);
           this.sharp = this.sharp.extract(rect);
         }
       }
@@ -212,3 +225,4 @@ export class ImageProcessor {
     }
   }
 }
+
