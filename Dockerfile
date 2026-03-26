@@ -1,12 +1,15 @@
 FROM oven/bun:1-alpine AS base
 
 # Install dependencies for sharp (image processing library)
+# Including support for AVIF, WebP, JPEG, PNG
 RUN apk add --no-cache \
     libc6-compat \
     python3 \
     make \
     g++ \
-    vips-dev
+    vips-dev \
+    vips-heif \
+    libheif
 
 WORKDIR /app
 

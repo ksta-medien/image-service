@@ -6,7 +6,11 @@ export class ImageProcessor {
   private sharp: Sharp;
 
   constructor(imageBuffer: Buffer) {
-    this.sharp = sharp(imageBuffer);
+    // Force sharp to detect the format and handle various image types
+    this.sharp = sharp(imageBuffer, {
+      failOnError: false,
+      unlimited: true
+    });
   }
 
   /**
@@ -99,7 +103,7 @@ export class ImageProcessor {
     }
 
     const normalized = crop.toLowerCase().replace(/\s/g, '');
-    
+
     if (normalized.includes('faces') && normalized.includes('entropy')) {
       return sharp.strategy.attention; // Best of both worlds
     } else if (normalized.includes('faces')) {
@@ -116,6 +120,17 @@ export class ImageProcessor {
    */
   async process(params: ImageProcessingParams): Promise<Buffer> {
     try {
+      // Verify the image can be read
+      const metadata = await this.sharp.metadata();
+      console.log('Image metadata:', {
+        format: metadata.format,
+        width: metadata.width,
+        height: metadata.height,
+        space: metadata.space,
+        channels: metadata.channels,
+        hasAlpha: metadata.hasAlpha
+      });
+
       // Step 1: Apply source rectangle crop if specified
       if (params.rect) {
         const rect = this.parseRect(params.rect);
@@ -161,7 +176,7 @@ export class ImageProcessor {
           this.sharp = this.sharp.webp({ quality });
           break;
         case 'png':
-          this.sharp = this.sharp.png({ 
+          this.sharp = this.sharp.png({
             quality,
             compressionLevel: Math.round((100 - quality) / 10)
           });
