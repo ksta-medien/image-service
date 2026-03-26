@@ -159,9 +159,21 @@ export class ImageProcessor {
       if (params.ar) {
         const ar = this.parseAspectRatio(params.ar);
         if (ar) {
-          const dimensions = await this.calculateAspectRatioDimensions(ar, params.w, params.h);
-          finalWidth = dimensions.width;
-          finalHeight = dimensions.height;
+          // If aspect ratio is specified, it takes precedence
+          // Calculate height from width and aspect ratio, or vice versa
+          if (params.w) {
+            const dimensions = await this.calculateAspectRatioDimensions(ar, params.w, undefined);
+            finalWidth = dimensions.width;
+            finalHeight = dimensions.height;
+          } else if (params.h) {
+            const dimensions = await this.calculateAspectRatioDimensions(ar, undefined, params.h);
+            finalWidth = dimensions.width;
+            finalHeight = dimensions.height;
+          } else {
+            const dimensions = await this.calculateAspectRatioDimensions(ar, undefined, undefined);
+            finalWidth = dimensions.width;
+            finalHeight = dimensions.height;
+          }
         }
       }
 
@@ -197,7 +209,11 @@ export class ImageProcessor {
         case 'jpg':
         case 'jpeg':
         default:
-          this.sharp = this.sharp.jpeg({ quality });
+          this.sharp = this.sharp.jpeg({
+            quality,
+            progressive: true,
+            mozjpeg: true
+          });
           break;
       }
 

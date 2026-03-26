@@ -48,20 +48,18 @@ gcloud run deploy image-service \
 
 ## Wichtig: Service Account Berechtigungen
 
-Der Cloud Run Service Account muss Lesezugriff auf den GCS-Bucket haben:
+Der Cloud Run Service Account (`734680744363-compute@developer.gserviceaccount.com`) benötigt Lesezugriff auf den GCS-Bucket.
+
+**Berechtigung wurde bereits gesetzt:**
 
 ```bash
-# Service Account Email finden
-gcloud run services describe image-service --region europe-west3 --format='value(spec.template.spec.serviceAccountName)'
-
-# Berechtigung erteilen
-gsutil iam ch serviceAccount:SERVICE_ACCOUNT_EMAIL:objectViewer gs://livingdocs-image-live
+gsutil iam ch serviceAccount:734680744363-compute@developer.gserviceaccount.com:objectViewer gs://livingdocs-image-live
 ```
 
-Oder in der Google Cloud Console:
-1. Gehe zu Cloud Storage > livingdocs-image-live
-2. Klicke auf "Permissions"
-3. Füge den Service Account mit der Rolle "Storage Object Viewer" hinzu
+Überprüfen:
+```bash
+gsutil iam get gs://livingdocs-image-live | grep "734680744363-compute"
+```
 
 ## Änderungen
 
