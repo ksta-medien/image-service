@@ -26,5 +26,6 @@
     
     // Additional options
     "types": ["bun-types"]
-  }
+  },
+  "exclude": ["nuxt-image-provider"]
 }

@@ -3,6 +3,7 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { Storage } from '@google-cloud/storage';
 import { ImageProcessor } from './image-processor';
+import { FaceDetector } from './face-detector';
 import type { ImageProcessingParams } from './types';
 
 const app = new Hono();
@@ -11,6 +12,11 @@ const app = new Hono();
 const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME || 'livingdocs-image-live';
 const GCS_BUCKET_BASE_URL = process.env.GCS_BUCKET_BASE_URL ||
   'https://storage.cloud.google.com/livingdocs-image-live';
+
+// Pre-warm the BlazeFace model in the background so the first request is fast
+FaceDetector.load().catch((err) =>
+  console.warn('[FaceDetector] Pre-warm failed (non-fatal):', err)
+);
 
 // Initialize Google Cloud Storage client
 const storage = new Storage();
@@ -61,7 +67,8 @@ app.get('/health', (c) => {
   return c.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    bucket: GCS_BUCKET_BASE_URL
+    bucket: GCS_BUCKET_BASE_URL,
+    faceDetection: FaceDetector.isLoaded() ? 'ready' : 'loading'
   });
 });
 

@@ -1,6 +1,7 @@
 import sharp from 'sharp';
 import type { Sharp, FitEnum } from 'sharp';
 import type { ImageProcessingParams, ParsedRect, ParsedAspectRatio } from './types';
+import { FaceDetector, computeFaceCenter, computeFocalCrop } from './face-detector';
 
 export class ImageProcessor {
   private sharp: Sharp;
@@ -98,7 +99,7 @@ export class ImageProcessor {
   }
 
   /**
-   * Get sharp strategy for smart cropping
+   * Get sharp strategy for smart cropping (used as fallback when no faces detected)
    */
   private getCropStrategy(crop?: string) {
     if (!crop) {
@@ -107,15 +108,18 @@ export class ImageProcessor {
 
     const normalized = crop.toLowerCase().replace(/\s/g, '');
 
-    if (normalized.includes('faces') && normalized.includes('entropy')) {
-      return sharp.strategy.attention; // Best of both worlds
-    } else if (normalized.includes('faces')) {
-      return sharp.strategy.attention; // Includes face detection
-    } else if (normalized.includes('entropy')) {
-      return sharp.strategy.entropy; // Focus on high entropy regions
+    if (normalized.includes('entropy')) {
+      return sharp.strategy.entropy;
     }
 
     return sharp.strategy.attention;
+  }
+
+  /**
+   * Returns true if the crop parameter requests face-based cropping
+   */
+  private static wantsFaceCrop(crop?: string): boolean {
+    return !!crop && crop.toLowerCase().includes('faces');
   }
 
   /**
@@ -180,11 +184,48 @@ export class ImageProcessor {
       // Step 3: Resize with fit mode
       if (finalWidth || finalHeight) {
         const fitMode = this.getFitMode(params.fit || 'crop');
-        const strategy = this.getCropStrategy(params.crop);
+
+        let position: number | string = this.getCropStrategy(params.crop);
+
+        // Real face detection: when crop=faces, locate faces and use their
+        // centroid as a focal point for the cover-crop. The region is extracted
+        // from the ORIGINAL image at the target aspect ratio – no extra zoom.
+        if (ImageProcessor.wantsFaceCrop(params.crop)) {
+          try {
+            const faces = await FaceDetector.detect(this.originalBuffer);
+            const center = computeFaceCenter(faces, metadata.width ?? 0, metadata.height ?? 0);
+
+            if (center) {
+              const region = computeFocalCrop(
+                metadata.width ?? 0,
+                metadata.height ?? 0,
+                finalWidth,
+                finalHeight,
+                center.x,
+                center.y
+              );
+
+              if (region) {
+                console.log('[FaceDetector] Focal-point extract region:', region);
+                // extract() clips the original to the right AR centered on the face;
+                // the following resize() only scales – no second crop, no zoom.
+                this.sharp = this.sharp.extract(region);
+              }
+              // position is irrelevant after extract, but set for safety
+              position = 'centre';
+            } else {
+              // No faces found → fall back to entropy
+              console.log('[FaceDetector] No faces found, falling back to entropy strategy.');
+              position = sharp.strategy.entropy;
+            }
+          } catch (faceErr) {
+            console.error('[FaceDetector] Error during detection, falling back:', faceErr);
+          }
+        }
 
         this.sharp = this.sharp.resize(finalWidth, finalHeight, {
           fit: fitMode,
-          position: strategy,
+          position,
           withoutEnlargement: false
         });
       }
