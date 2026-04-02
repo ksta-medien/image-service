@@ -79,11 +79,6 @@ jobs:
             --platform managed \
             --region $REGION \
             --allow-unauthenticated \
-            --memory 512Mi \
-            --cpu 1 \
-            --max-instances 10 \
-            --min-instances 0 \
-            --timeout 60s \
             --port 8080 \
             --set-env-vars="GCS_BUCKET_NAME=livingdocs-image-live,GCS_BUCKET_BASE_URL=https://storage.cloud.google.com/livingdocs-image-live"
 
