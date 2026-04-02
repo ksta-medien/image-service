@@ -199,7 +199,11 @@ export class ImageProcessor {
       if (finalWidth || finalHeight) {
         const fitMode = this.getFitMode(params.fit || "crop");
 
-        let position: number | string = sharp.strategy.entropy;
+        let position: number | string = sharp.strategy.attention;
+
+        console.log(
+          `[ImageProcessor] crop param: "${params.crop ?? "(none)"}", wantsFaceCrop: ${ImageProcessor.wantsFaceCrop(params.crop)}`,
+        );
 
         // Real face detection: when crop=faces, locate faces and use their
         // centroid as a focal point for the cover-crop. The region is extracted
@@ -235,11 +239,11 @@ export class ImageProcessor {
               // position is irrelevant after extract, but set for safety
               position = "centre";
             } else {
-              // No faces found → fall back to entropy
+              // No faces found → fall back to attention
               console.log(
-                "[FaceDetector] No faces found, falling back to entropy strategy.",
+                "[FaceDetector] No faces found, falling back to attention strategy.",
               );
-              position = sharp.strategy.entropy;
+              position = sharp.strategy.attention;
             }
           } catch (faceErr) {
             console.error(

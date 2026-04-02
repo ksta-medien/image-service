@@ -1,7 +1,7 @@
 import sharp from "sharp";
 
 /**
- * Bounding box einer erkannten Gesichtsregion (in Pixeln, relativ zum Eingabebild).
+ * Bounding box einer erkannten Region (Gesicht oder Person) in Pixeln.
  */
 export interface FaceBox {
   topLeft: [number, number];
@@ -9,13 +9,13 @@ export interface FaceBox {
 }
 
 /**
- * Berechnet das Zentrum (x, y) aller erkannten Gesichter als gewichteten Mittelpunkt.
- * Gibt null zurück wenn keine Gesichter gefunden wurden.
+ * Berechnet den gewichteten Mittelpunkt aller erkannten Boxen.
+ * Gibt null zurück wenn keine Boxen vorhanden.
  */
 export function computeFaceCenter(
   faces: FaceBox[],
-  imageWidth: number,
-  imageHeight: number
+  _imageWidth: number,
+  _imageHeight: number,
 ): { x: number; y: number } | null {
   if (faces.length === 0) return null;
 
@@ -41,10 +41,7 @@ export function computeFaceCenter(
  * - maximal die Originalgröße ausnutzt (kein Zoom),
  * - den Fokuspunkt (fx, fy) so zentral wie möglich platziert.
  *
- * Das Ergebnis kann direkt als Sharp `.extract()` Region verwendet werden.
- * Das nachfolgende `.resize()` skaliert dann nur noch – kein erneutes Cropping.
- *
- * Falls targetW oder targetH fehlt, wird null zurückgegeben (Fallback auf Sharp-Strategie).
+ * Gibt null zurück wenn targetW oder targetH fehlt (Fallback auf Sharp-Strategie).
  */
 export function computeFocalCrop(
   imgW: number,
@@ -52,7 +49,7 @@ export function computeFocalCrop(
   targetW: number | undefined,
   targetH: number | undefined,
   fx: number,
-  fy: number
+  fy: number,
 ): { left: number; top: number; width: number; height: number } | null {
   if (!targetW || !targetH) return null;
 
@@ -78,116 +75,283 @@ export function computeFocalCrop(
 
   return { left, top, width: cropW, height: cropH };
 }
-export class FaceDetector {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private static model: any = null;
-  private static loading: Promise<void> | null = null;
 
-  /**
-   * Lädt das BlazeFace-Modell (einmalig, gecacht).
-   */
-  static async load(): Promise<void> {
-    if (FaceDetector.model) return;
+// ---------------------------------------------------------------------------
+// Interne Modell-Singletons
+// ---------------------------------------------------------------------------
 
-    if (FaceDetector.loading) {
-      await FaceDetector.loading;
-      return;
-    }
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let faceModel: any = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let personModel: any = null;
+let modelsLoading: Promise<void> | null = null;
 
-    FaceDetector.loading = (async () => {
-      console.log("[FaceDetector] Loading BlazeFace model (WASM backend)...");
+async function initBackend(): Promise<void> {
+  const tf = await import("@tensorflow/tfjs-core");
+  await import("@tensorflow/tfjs-backend-wasm");
+  await import("@tensorflow/tfjs-converter");
+  await tf.setBackend("wasm");
+  await tf.ready();
+}
 
-      // WASM backend registrieren
-      const tf = await import("@tensorflow/tfjs-core");
-      await import("@tensorflow/tfjs-backend-wasm");
-      await tf.setBackend("wasm");
-      await tf.ready();
+/**
+ * Lädt beide Modelle einmalig (gecacht).
+ * - MediaPipe Face Detector (Full Range) — Stufe 1
+ * - COCO-SSD — Stufe 2 (Person-Fallback)
+ */
+async function loadModels(): Promise<void> {
+  if (faceModel && personModel) return;
 
-      const blazeface = await import("@tensorflow-models/blazeface");
-      FaceDetector.model = await blazeface.load();
-
-      console.log("[FaceDetector] Model loaded successfully.");
-    })();
-
-    await FaceDetector.loading;
+  if (modelsLoading) {
+    await modelsLoading;
+    return;
   }
 
-  /**
-   * Erkennt Gesichter im übergebenen Bild-Buffer.
-   * Gibt die Bounding Boxes zurück, oder [] wenn keine gefunden wurden.
-   *
-   * Fallback auf [] bei Fehlern (Service bleibt stabil).
-   */
+  modelsLoading = (async () => {
+    console.log("[FaceDetector] Initialising WASM backend...");
+    await initBackend();
+
+    console.log(
+      "[FaceDetector] Loading MediaPipe Face Detector (full range)...",
+    );
+    const faceDetection = await import("@tensorflow-models/face-detection");
+    faceModel = await faceDetection.createDetector(
+      faceDetection.SupportedModels.MediaPipeFaceDetector,
+      {
+        runtime: "tfjs",
+        modelType: "full", // erkennt kleine, entfernte Gesichter besser als 'short'
+      },
+    );
+    console.log("[FaceDetector] Face model ready.");
+
+    console.log("[FaceDetector] Loading COCO-SSD (person fallback)...");
+    const cocoSsd = await import("@tensorflow-models/coco-ssd");
+    personModel = await cocoSsd.load({ base: "mobilenet_v2" });
+    console.log("[FaceDetector] COCO-SSD ready.");
+  })();
+
+  await modelsLoading;
+}
+
+// ---------------------------------------------------------------------------
+// Hilfsfunktion: Sharp-Buffer → RGB Tensor
+// ---------------------------------------------------------------------------
+
+async function bufferToRgbTensor(imageBuffer: Buffer) {
+  const tf = await import("@tensorflow/tfjs-core");
+  const { data, info } = await sharp(imageBuffer)
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  return {
+    tensor: tf.tensor3d(new Uint8Array(data), [info.height, info.width, 3]),
+    width: info.width,
+    height: info.height,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Stufe 1 – MediaPipe Face Detector
+// ---------------------------------------------------------------------------
+
+async function detectFaces(imageBuffer: Buffer): Promise<FaceBox[]> {
+  const { tensor, width, height } = await bufferToRgbTensor(imageBuffer);
+  console.log(
+    `[FaceDetector:MediaPipe] Running inference on ${width}×${height} image...`,
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const predictions: any[] = await faceModel.estimateFaces(tensor);
+  tensor.dispose();
+
+  if (!predictions || predictions.length === 0) {
+    console.log("[FaceDetector:MediaPipe] Result: 0 faces detected.");
+    return [];
+  }
+
+  console.log(
+    `[FaceDetector:MediaPipe] Result: ${predictions.length} face(s) detected.`,
+  );
+
+  const boxes = predictions.map(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (p: any, i: number): FaceBox => {
+      const box = p.box ?? p.boundingBox ?? p;
+      // MediaPipe face-detection returns { xMin, yMin, width, height }
+      const xMin = Math.max(0, Math.round(box.xMin ?? box.topLeft?.[0] ?? 0));
+      const yMin = Math.max(0, Math.round(box.yMin ?? box.topLeft?.[1] ?? 0));
+      const w = Math.round(
+        box.width !== undefined
+          ? box.width
+          : box.bottomRight?.[0] !== undefined
+            ? box.bottomRight[0] - xMin
+            : 0,
+      );
+      const h = Math.round(
+        box.height !== undefined
+          ? box.height
+          : box.bottomRight?.[1] !== undefined
+            ? box.bottomRight[1] - yMin
+            : 0,
+      );
+      const result: FaceBox = {
+        topLeft: [xMin, yMin],
+        bottomRight: [Math.min(xMin + w, width), Math.min(yMin + h, height)],
+      };
+      const score = p.score ?? p.probability ?? "n/a";
+      console.log(
+        `[FaceDetector:MediaPipe]   Face ${i + 1}: topLeft=(${result.topLeft}) bottomRight=(${result.bottomRight}) score=${typeof score === "number" ? score.toFixed(3) : score}`,
+      );
+      return result;
+    },
+  );
+
+  return boxes;
+}
+
+// ---------------------------------------------------------------------------
+// Stufe 2 – COCO-SSD Person-Fallback
+// ---------------------------------------------------------------------------
+
+const PERSON_CLASSES = new Set(["person"]);
+
+async function detectPersons(imageBuffer: Buffer): Promise<FaceBox[]> {
+  const { tensor, width, height } = await bufferToRgbTensor(imageBuffer);
+  console.log(
+    `[FaceDetector:COCO-SSD] Running inference on ${width}×${height} image...`,
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const predictions: any[] = await personModel.detect(tensor);
+  tensor.dispose();
+
+  console.log(
+    `[FaceDetector:COCO-SSD] Raw detections: ${predictions.length} total → ` +
+      predictions
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .map((p: any) => `${p.class}(${p.score.toFixed(2)})`)
+        .join(", ") || "(none)",
+  );
+
+  const persons = predictions.filter(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (p: any) => PERSON_CLASSES.has(p.class) && p.score >= 0.4,
+  );
+
+  if (persons.length === 0) {
+    console.log(
+      "[FaceDetector:COCO-SSD] Result: 0 persons above threshold (score >= 0.4).",
+    );
+    return [];
+  }
+
+  console.log(
+    `[FaceDetector:COCO-SSD] Result: ${persons.length} person(s) above threshold.`,
+  );
+
+  return persons.map(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (p: any, i: number): FaceBox => {
+      // COCO-SSD: bbox = [x, y, width, height]
+      const [x, y, w, h] = p.bbox as [number, number, number, number];
+      // Use upper 40% of person bounding box as the "head" focal region
+      const headH = Math.round(h * 0.4);
+      const result: FaceBox = {
+        topLeft: [Math.max(0, Math.round(x)), Math.max(0, Math.round(y))],
+        bottomRight: [
+          Math.min(Math.round(x + w), width),
+          Math.min(Math.round(y + headH), height),
+        ],
+      };
+      console.log(
+        `[FaceDetector:COCO-SSD]   Person ${i + 1}: score=${p.score.toFixed(3)} fullBox=[${Math.round(x)},${Math.round(y)},${Math.round(w)},${Math.round(h)}] headRegion topLeft=(${result.topLeft}) bottomRight=(${result.bottomRight})`,
+      );
+      return result;
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Öffentliche API
+// ---------------------------------------------------------------------------
+
+/**
+ * Kaskadierende Gesichts- und Personenerkennung:
+ *
+ * 1. MediaPipe Face Detector (Full Range) – erkennt Gesichter inkl. kleiner,
+ *    entfernter und leicht seitlicher Aufnahmen
+ * 2. COCO-SSD Person-Detector – Fallback wenn keine Gesichter erkannt wurden;
+ *    verwendet den oberen Bereich der Personen-Box als Fokusregion
+ *
+ * Gibt [] zurück wenn weder Gesichter noch Personen gefunden werden.
+ * Gibt immer [] bei Fehlern zurück (Service bleibt stabil).
+ */
+export class FaceDetector {
+  static async load(): Promise<void> {
+    await loadModels();
+  }
+
   static async detect(imageBuffer: Buffer): Promise<FaceBox[]> {
     try {
-      await FaceDetector.load();
+      await loadModels();
 
-      const tf = await import("@tensorflow/tfjs-core");
-
-      // Sharp → unkomprimierter RGB-Buffer (BlazeFace erwartet RGB-Tensor)
-      const { data, info } = await sharp(imageBuffer)
-        .removeAlpha()
-        .raw()
-        .toBuffer({ resolveWithObject: true });
-
-      const tensor = tf.tensor3d(new Uint8Array(data), [
-        info.height,
-        info.width,
-        3,
-      ]);
-
-      // returnTensors: false → gibt plain JS-Objekte zurück
-      const predictions = await FaceDetector.model.estimateFaces(
-        tensor,
-        false
+      console.log(
+        `[FaceDetector] detect() called — buffer size: ${imageBuffer.length} bytes`,
       );
 
-      tensor.dispose();
-
-      if (!predictions || predictions.length === 0) {
-        console.log("[FaceDetector] No faces detected.");
-        return [];
+      // Stufe 1: MediaPipe Face Detector
+      const faces = await detectFaces(imageBuffer);
+      if (faces.length > 0) {
+        const cx = Math.round(
+          faces.reduce((s, f) => s + (f.topLeft[0] + f.bottomRight[0]) / 2, 0) /
+            faces.length,
+        );
+        const cy = Math.round(
+          faces.reduce((s, f) => s + (f.topLeft[1] + f.bottomRight[1]) / 2, 0) /
+            faces.length,
+        );
+        console.log(
+          `[FaceDetector] ✓ Model used: MediaPipe | Boxes: ${faces.length} | Focal point: (${cx}, ${cy})`,
+        );
+        return faces;
       }
 
-      console.log(`[FaceDetector] ${predictions.length} face(s) detected.`);
-
-      return predictions.map(
-        (p: {
-          topLeft: [number, number] | Float32Array;
-          bottomRight: [number, number] | Float32Array;
-        }) => ({
-          topLeft: [
-            Math.round(
-              Array.isArray(p.topLeft) ? p.topLeft[0] : p.topLeft[0]
-            ),
-            Math.round(
-              Array.isArray(p.topLeft) ? p.topLeft[1] : p.topLeft[1]
-            ),
-          ] as [number, number],
-          bottomRight: [
-            Math.round(
-              Array.isArray(p.bottomRight)
-                ? p.bottomRight[0]
-                : p.bottomRight[0]
-            ),
-            Math.round(
-              Array.isArray(p.bottomRight)
-                ? p.bottomRight[1]
-                : p.bottomRight[1]
-            ),
-          ] as [number, number],
-        })
+      // Stufe 2: COCO-SSD Person-Fallback
+      console.log(
+        "[FaceDetector] → No faces found, switching to COCO-SSD person detection...",
       );
+      const persons = await detectPersons(imageBuffer);
+      if (persons.length > 0) {
+        const cx = Math.round(
+          persons.reduce(
+            (s, f) => s + (f.topLeft[0] + f.bottomRight[0]) / 2,
+            0,
+          ) / persons.length,
+        );
+        const cy = Math.round(
+          persons.reduce(
+            (s, f) => s + (f.topLeft[1] + f.bottomRight[1]) / 2,
+            0,
+          ) / persons.length,
+        );
+        console.log(
+          `[FaceDetector] ✓ Model used: COCO-SSD (person fallback) | Boxes: ${persons.length} | Focal point: (${cx}, ${cy})`,
+        );
+        return persons;
+      }
+
+      console.log(
+        "[FaceDetector] ✗ No faces or persons detected → attention fallback will be used.",
+      );
+      return [];
     } catch (err) {
-      console.error("[FaceDetector] Detection failed, falling back:", err);
+      console.error("[FaceDetector] Detection error, falling back:", err);
       return [];
     }
   }
 
-  /**
-   * Gibt true zurück wenn das Modell bereits geladen ist.
-   */
   static isLoaded(): boolean {
-    return FaceDetector.model !== null;
+    return faceModel !== null && personModel !== null;
   }
 }
