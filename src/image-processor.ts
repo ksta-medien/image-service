@@ -283,7 +283,11 @@ export class ImageProcessor {
           this.sharp = this.sharp.jpeg({
             quality,
             progressive: true,
-            mozjpeg: true,
+            // mozjpeg: false (war true) - mozjpeg kostet ~30-50ms zusaetzlich
+            // und macht keinen wahrnehmbaren Unterschied bei q=70 (Standardwert).
+            // Bilder werden von Akamai gecacht, daher ist Encode-Geschwindigkeit
+            // wichtiger als minimale Byte-Einsparung.
+            mozjpeg: false,
           });
           break;
       }
