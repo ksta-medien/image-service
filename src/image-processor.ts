@@ -199,7 +199,7 @@ export class ImageProcessor {
       if (finalWidth || finalHeight) {
         const fitMode = this.getFitMode(params.fit || "crop");
 
-        let position: number | string = sharp.strategy.attention;
+        let position: number | string = sharp.strategy.entropy;
 
         console.log(
           `[ImageProcessor] crop param: "${params.crop ?? "(none)"}", wantsFaceCrop: ${ImageProcessor.wantsFaceCrop(params.crop)}`,
@@ -239,11 +239,11 @@ export class ImageProcessor {
               // position is irrelevant after extract, but set for safety
               position = "centre";
             } else {
-              // No faces found → fall back to attention
+              // No faces found → fall back to entropy
               console.log(
-                "[FaceDetector] No faces found, falling back to attention strategy.",
+                "[FaceDetector] No faces found, falling back to entropy strategy.",
               );
-              position = sharp.strategy.attention;
+              position = sharp.strategy.entropy;
             }
           } catch (faceErr) {
             console.error(

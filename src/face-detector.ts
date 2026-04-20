@@ -147,7 +147,9 @@ const FACE_DETECTION_MAX_INPUT_WIDTH = parseInt(
 );
 
 async function bufferToRgbTensor(imageBuffer: Buffer): Promise<{
-  tensor: Awaited<ReturnType<typeof import("@tensorflow/tfjs-core")["tensor3d"]>>;
+  tensor: Awaited<
+    ReturnType<(typeof import("@tensorflow/tfjs-core"))["tensor3d"]>
+  >;
   width: number;
   height: number;
   scaleX: number;
@@ -176,7 +178,9 @@ async function bufferToRgbTensor(imageBuffer: Buffer): Promise<{
     resizePipeline.resize(inferenceWidth, inferenceHeight, { fit: "fill" });
   }
 
-  const { data, info } = await resizePipeline.raw().toBuffer({ resolveWithObject: true });
+  const { data, info } = await resizePipeline
+    .raw()
+    .toBuffer({ resolveWithObject: true });
 
   return {
     tensor: tf.tensor3d(new Uint8Array(data), [info.height, info.width, 3]),
@@ -193,7 +197,8 @@ async function bufferToRgbTensor(imageBuffer: Buffer): Promise<{
 // ---------------------------------------------------------------------------
 
 async function detectFaces(imageBuffer: Buffer): Promise<FaceBox[]> {
-  const { tensor, width, height, scaleX, scaleY } = await bufferToRgbTensor(imageBuffer);
+  const { tensor, width, height, scaleX, scaleY } =
+    await bufferToRgbTensor(imageBuffer);
   console.log(
     `[FaceDetector:MediaPipe] Running inference on ${width}x${height} image (scaleX=${scaleX.toFixed(2)}, scaleY=${scaleY.toFixed(2)})...`,
   );
@@ -215,8 +220,14 @@ async function detectFaces(imageBuffer: Buffer): Promise<FaceBox[]> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (p: any, i: number): FaceBox => {
       const box = p.box ?? p.boundingBox ?? p;
-      const xMin = Math.max(0, Math.round((box.xMin ?? box.topLeft?.[0] ?? 0) * scaleX));
-      const yMin = Math.max(0, Math.round((box.yMin ?? box.topLeft?.[1] ?? 0) * scaleY));
+      const xMin = Math.max(
+        0,
+        Math.round((box.xMin ?? box.topLeft?.[0] ?? 0) * scaleX),
+      );
+      const yMin = Math.max(
+        0,
+        Math.round((box.yMin ?? box.topLeft?.[1] ?? 0) * scaleY),
+      );
       const w = Math.round(
         (box.width !== undefined
           ? box.width
@@ -253,7 +264,8 @@ async function detectFaces(imageBuffer: Buffer): Promise<FaceBox[]> {
 const PERSON_CLASSES = new Set(["person"]);
 
 async function detectPersons(imageBuffer: Buffer): Promise<FaceBox[]> {
-  const { tensor, width, height, scaleX, scaleY } = await bufferToRgbTensor(imageBuffer);
+  const { tensor, width, height, scaleX, scaleY } =
+    await bufferToRgbTensor(imageBuffer);
   console.log(
     `[FaceDetector:COCO-SSD] Running inference on ${width}x${height} image...`,
   );
@@ -380,7 +392,7 @@ export class FaceDetector {
       }
 
       console.log(
-        "[FaceDetector] ✗ No faces or persons detected → attention fallback will be used.",
+        "[FaceDetector] ✗ No faces or persons detected → entropy fallback will be used.",
       );
       return [];
     } catch (err) {
