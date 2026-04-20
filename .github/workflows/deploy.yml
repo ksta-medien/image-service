@@ -118,7 +118,7 @@ jobs:
           echo "[live] ${{ matrix.service }} deployed to: $SERVICE_URL"
 
   # ---------------------------------------------------------------------------
-  # Build: qa  →  Image einmal bauen, dann auf 3 Services deployen
+  # Build: qa  →  Image einmal bauen, dann in einen Service deployen
   # ---------------------------------------------------------------------------
   build-qa:
     name: Build (qa)
