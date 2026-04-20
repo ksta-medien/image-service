@@ -9,6 +9,14 @@ import type { ImageProcessingParams } from './types';
 
 const app = new Hono();
 
+/** Signals that a requested resource does not exist (maps to HTTP 404). */
+class NotFoundError extends Error {
+  constructor(path: string) {
+    super(`Image not found: ${path}`);
+    this.name = 'NotFoundError';
+  }
+}
+
 // Configuration
 const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME || 'livingdocs-image-live';
 const GCS_BUCKET_BASE_URL = process.env.GCS_BUCKET_BASE_URL ||
@@ -48,6 +56,11 @@ async function fetchImageFromGCS(imagePath: string): Promise<Buffer> {
     return buffer;
   } catch (error) {
     console.error(`Failed to download from GCS:`, error);
+    // GCS throws a structured error with code 404 when the object does not exist
+    const code = (error as { code?: number }).code;
+    if (code === 404) {
+      throw new NotFoundError(cleanPath);
+    }
     throw new Error(`Failed to download image from GCS: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
@@ -110,6 +123,9 @@ app.get('/:path{.+\\.(jpg|jpeg|png|webp|avif)}', async (c) => {
     try {
       imageBuffer = await fetchImageFromGCS(imagePath);
     } catch (fetchError) {
+      if (fetchError instanceof NotFoundError) {
+        return c.json({ error: 'Image not found', path: imagePath }, 404);
+      }
       console.error(`Failed to fetch image from GCS:`, fetchError);
       return c.json({
         error: `Failed to fetch image: ${fetchError instanceof Error ? fetchError.message : 'Unknown error'}`,
