@@ -213,7 +213,7 @@ jobs:
           echo "[qa] ${{ matrix.service }} deployed to: $SERVICE_URL"
 
   # ---------------------------------------------------------------------------
-  # Deploy: dev  →  1 Cloud Run Service
+  # Deploy: Dev  →  1 Cloud Run Service
   # ---------------------------------------------------------------------------
   deploy-dev:
     name: Deploy image-service-dev (dev)
