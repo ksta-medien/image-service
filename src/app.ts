@@ -119,7 +119,7 @@ app.get('/:path{.+\\.(jpg|jpeg|png|webp|avif)}', async (c) => {
 
     // Process the image
     try {
-      const processor = new ImageProcessor(imageBuffer, imagePath);
+      const processor = new ImageProcessor(imageBuffer);
       const processedImage = await processor.process(params);
       console.log(`Successfully processed image: ${processedImage.length} bytes, format: ${params.fm || 'jpg'}`);
 

@@ -13,12 +13,10 @@ import {
 
 export class ImageProcessor {
   private sharp: Sharp;
-  private readonly originalBuffer: Buffer;
-  private readonly cacheKey: string | undefined;
+  private originalBuffer: Buffer;
 
-  constructor(imageBuffer: Buffer, cacheKey?: string) {
+  constructor(imageBuffer: Buffer) {
     this.originalBuffer = imageBuffer;
-    this.cacheKey = cacheKey;
     // Force sharp to detect the format and handle various image types
     // Don't set failOnError to false as it might hide real errors
     this.sharp = sharp(imageBuffer, {
@@ -212,7 +210,7 @@ export class ImageProcessor {
         // from the ORIGINAL image at the target aspect ratio – no extra zoom.
         if (ImageProcessor.wantsFaceCrop(params.crop)) {
           try {
-            const faces = await FaceDetector.detect(this.originalBuffer, this.cacheKey);
+            const faces = await FaceDetector.detect(this.originalBuffer);
             const center = computeFaceCenter(
               faces,
               metadata.width ?? 0,
