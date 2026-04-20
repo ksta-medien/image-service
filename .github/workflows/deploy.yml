@@ -118,7 +118,7 @@ jobs:
           echo "[live] ${{ matrix.service }} deployed to: $SERVICE_URL"
 
   # ---------------------------------------------------------------------------
-  # Build: qa  →  Image einmal bauen, dann auf 3 Services deployen
+  # Build: qa  →  Image einmal bauen, dann in einen Service deployen
   # ---------------------------------------------------------------------------
   build-qa:
     name: Build (qa)
@@ -157,26 +157,17 @@ jobs:
           docker push ${{ env.IMAGE_REGISTRY }}:qa-latest
 
   # ---------------------------------------------------------------------------
-  # Deploy: qa  →  3 Cloud Run Services (Matrix)
+  # Deploy: qa  →  1 Cloud Run Service
   # ---------------------------------------------------------------------------
   deploy-qa:
-    name: Deploy ${{ matrix.service }} (qa)
+    name: Deploy image-service-qa (qa)
     runs-on: ubuntu-latest
     needs: build-qa
 
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - service: ksta-image-service-qa
-            GCS_BUCKET_NAME: livingdocs-image-qa
-            GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/livingdocs-image-qa
-          - service: kr-image-service-qa
-            GCS_BUCKET_NAME: livingdocs-image-qa
-            GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/livingdocs-image-qa
-          - service: exp-image-service-qa  # Cloud Run erlaubt keine Unterstriche
-            GCS_BUCKET_NAME: livingdocs-image-qa
-            GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/livingdocs-image-qa
+    env:
+      SERVICE_NAME: image-service-qa
+      GCS_BUCKET_NAME: livingdocs-image-qa
+      GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/livingdocs-image-qa
 
     permissions:
       contents: read
@@ -194,26 +185,26 @@ jobs:
 
       - name: Deploy to Cloud Run
         run: |
-          gcloud run deploy ${{ matrix.service }} \
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
             --image ${{ env.IMAGE_REGISTRY }}:${{ github.sha }} \
             --platform managed \
             --region ${{ env.REGION }} \
             --project ${{ env.PROJECT_ID }} \
             --allow-unauthenticated \
             --port 8080 \
-            --set-env-vars="GCS_BUCKET_NAME=${{ matrix.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ matrix.GCS_BUCKET_BASE_URL }}"
+            --set-env-vars="GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ env.GCS_BUCKET_BASE_URL }}"
 
       - name: Get service URL
         run: |
-          SERVICE_URL=$(gcloud run services describe ${{ matrix.service }} \
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
             --platform managed \
             --region ${{ env.REGION }} \
             --project ${{ env.PROJECT_ID }} \
             --format 'value(status.url)')
-          echo "[qa] ${{ matrix.service }} deployed to: $SERVICE_URL"
+          echo "[qa] ${{ env.SERVICE_NAME }} deployed to: $SERVICE_URL"
 
   # ---------------------------------------------------------------------------
-  # Deploy: dev  →  1 Cloud Run Service
+  # Deploy: Dev  →  1 Cloud Run Service
   # ---------------------------------------------------------------------------
   deploy-dev:
     name: Deploy image-service-dev (dev)
