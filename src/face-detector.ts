@@ -77,54 +77,6 @@ export function computeFocalCrop(
 }
 
 // ---------------------------------------------------------------------------
-// LRU-Cache für Erkennungsergebnisse (pro Bild-Pfad / UUID)
-// ---------------------------------------------------------------------------
-
-/**
- * Einfacher LRU-Cache für FaceBox[]-Ergebnisse.
- * Schlüssel: Bild-Pfad (z.B. "2024/04/19/<uuid>.jpeg") – ohne Query-Parameter.
- * Größe: 2000 Einträge ≈ ~1 Tag unique Bilder bei Normallast.
- *
- * Begründung: 97.5 % aller Requests nutzen crop=faces.
- * Nach einem Akamai-Cache-Flush trifft jedes Bild in bis zu 5 Auflösungen
- * als TCP_MISS auf den Origin. Ohne Cache läuft TF-Inferenz 5× pro Bild.
- * Mit Cache läuft sie einmal; alle weiteren Requests lesen aus dem Map.
- */
-const FACE_CACHE_MAX_SIZE = parseInt(
-  process.env.FACE_CACHE_MAX_SIZE ?? "2000",
-  10,
-);
-
-class LRUCache<K, V> {
-  private map = new Map<K, V>();
-  constructor(private readonly maxSize: number) {}
-
-  get(key: K): V | undefined {
-    if (!this.map.has(key)) return undefined;
-    // Promote to "most recently used"
-    const value = this.map.get(key)!;
-    this.map.delete(key);
-    this.map.set(key, value);
-    return value;
-  }
-
-  set(key: K, value: V): void {
-    if (this.map.has(key)) this.map.delete(key);
-    else if (this.map.size >= this.maxSize) {
-      // Evict least recently used (first inserted key)
-      this.map.delete(this.map.keys().next().value!);
-    }
-    this.map.set(key, value);
-  }
-
-  get size(): number {
-    return this.map.size;
-  }
-}
-
-const faceResultCache = new LRUCache<string, FaceBox[]>(FACE_CACHE_MAX_SIZE);
-
-// ---------------------------------------------------------------------------
 // Interne Modell-Singletons
 // ---------------------------------------------------------------------------
 
@@ -378,25 +330,9 @@ export class FaceDetector {
     await loadModels();
   }
 
-  static async detect(imageBuffer: Buffer, cacheKey?: string): Promise<FaceBox[]> {
+  static async detect(imageBuffer: Buffer): Promise<FaceBox[]> {
     try {
       await loadModels();
-
-      // LRU-Cache: Wenn wir das Ergebnis für diesen Bild-Pfad bereits kennen,
-      // TF-Inferenz überspringen. Spart ~500-700ms bei Folge-Requests (z.B.
-      // dasselbe Bild in verschiedenen Auflösungen nach Cache-Flush).
-      if (cacheKey) {
-        const cached = faceResultCache.get(cacheKey);
-        if (cached !== undefined) {
-          console.log(
-            `[FaceDetector] Cache HIT for "${cacheKey}" → ${cached.length} box(es), skipping inference. Cache size: ${faceResultCache.size}`,
-          );
-          return cached;
-        }
-        console.log(
-          `[FaceDetector] Cache MISS for "${cacheKey}". Cache size: ${faceResultCache.size}`,
-        );
-      }
 
       console.log(
         `[FaceDetector] detect() called — buffer size: ${imageBuffer.length} bytes`,
@@ -416,7 +352,6 @@ export class FaceDetector {
         console.log(
           `[FaceDetector] ✓ Model used: MediaPipe | Boxes: ${faces.length} | Focal point: (${cx}, ${cy})`,
         );
-        if (cacheKey) faceResultCache.set(cacheKey, faces);
         return faces;
       }
 
@@ -441,16 +376,13 @@ export class FaceDetector {
         console.log(
           `[FaceDetector] ✓ Model used: COCO-SSD (person fallback) | Boxes: ${persons.length} | Focal point: (${cx}, ${cy})`,
         );
-        if (cacheKey) faceResultCache.set(cacheKey, persons);
         return persons;
       }
 
       console.log(
         "[FaceDetector] ✗ No faces or persons detected → attention fallback will be used.",
       );
-      const empty: FaceBox[] = [];
-      if (cacheKey) faceResultCache.set(cacheKey, empty);
-      return empty;
+      return [];
     } catch (err) {
       console.error("[FaceDetector] Detection error, falling back:", err);
       return [];
