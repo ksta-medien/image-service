@@ -137,54 +137,17 @@ async function loadModels(): Promise<void> {
 // Hilfsfunktion: Sharp-Buffer → RGB Tensor
 // ---------------------------------------------------------------------------
 
-// Maximale Eingangsbreite fuer TensorFlow-Inferenz.
-// Groessere Bilder werden proportional verkleinert bevor sie dem Modell
-// uebergeben werden. Gesichtspositionen werden zurueckskaliert.
-// Konfigurierbar ueber FACE_DETECTION_MAX_INPUT_WIDTH (Default: 640).
-const FACE_DETECTION_MAX_INPUT_WIDTH = parseInt(
-  process.env.FACE_DETECTION_MAX_INPUT_WIDTH ?? "640",
-  10,
-);
-
-async function bufferToRgbTensor(imageBuffer: Buffer): Promise<{
-  tensor: Awaited<ReturnType<typeof import("@tensorflow/tfjs-core")["tensor3d"]>>;
-  width: number;
-  height: number;
-  scaleX: number;
-  scaleY: number;
-}> {
+async function bufferToRgbTensor(imageBuffer: Buffer) {
   const tf = await import("@tensorflow/tfjs-core");
-
-  // Originaldimensionen lesen ohne vollstaendiges Dekodieren
-  const meta = await sharp(imageBuffer).metadata();
-  const origWidth = meta.width ?? FACE_DETECTION_MAX_INPUT_WIDTH;
-  const origHeight = meta.height ?? FACE_DETECTION_MAX_INPUT_WIDTH;
-
-  // Bild auf Maximalbreite begrenzen um Inferenzzeit zu reduzieren.
-  // Auf einem 4MP-Bild (2000x2000px) dauert MediaPipe ~300ms,
-  // auf 640px ~60ms. Gesichter sind auch auf 640px zuverlaessig erkennbar.
-  let inferenceWidth = origWidth;
-  let inferenceHeight = origHeight;
-  if (origWidth > FACE_DETECTION_MAX_INPUT_WIDTH) {
-    const scale = FACE_DETECTION_MAX_INPUT_WIDTH / origWidth;
-    inferenceWidth = FACE_DETECTION_MAX_INPUT_WIDTH;
-    inferenceHeight = Math.round(origHeight * scale);
-  }
-
-  const resizePipeline = sharp(imageBuffer).removeAlpha();
-  if (inferenceWidth !== origWidth) {
-    resizePipeline.resize(inferenceWidth, inferenceHeight, { fit: "fill" });
-  }
-
-  const { data, info } = await resizePipeline.raw().toBuffer({ resolveWithObject: true });
+  const { data, info } = await sharp(imageBuffer)
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
 
   return {
     tensor: tf.tensor3d(new Uint8Array(data), [info.height, info.width, 3]),
     width: info.width,
     height: info.height,
-    // Skalierungsfaktoren um erkannte Boxen auf Originalkoordinaten zurueckzurechnen
-    scaleX: origWidth / info.width,
-    scaleY: origHeight / info.height,
   };
 }
 
@@ -193,9 +156,9 @@ async function bufferToRgbTensor(imageBuffer: Buffer): Promise<{
 // ---------------------------------------------------------------------------
 
 async function detectFaces(imageBuffer: Buffer): Promise<FaceBox[]> {
-  const { tensor, width, height, scaleX, scaleY } = await bufferToRgbTensor(imageBuffer);
+  const { tensor, width, height } = await bufferToRgbTensor(imageBuffer);
   console.log(
-    `[FaceDetector:MediaPipe] Running inference on ${width}x${height} image (scaleX=${scaleX.toFixed(2)}, scaleY=${scaleY.toFixed(2)})...`,
+    `[FaceDetector:MediaPipe] Running inference on ${width}×${height} image...`,
   );
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -215,25 +178,26 @@ async function detectFaces(imageBuffer: Buffer): Promise<FaceBox[]> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (p: any, i: number): FaceBox => {
       const box = p.box ?? p.boundingBox ?? p;
-      const xMin = Math.max(0, Math.round((box.xMin ?? box.topLeft?.[0] ?? 0) * scaleX));
-      const yMin = Math.max(0, Math.round((box.yMin ?? box.topLeft?.[1] ?? 0) * scaleY));
+      // MediaPipe face-detection returns { xMin, yMin, width, height }
+      const xMin = Math.max(0, Math.round(box.xMin ?? box.topLeft?.[0] ?? 0));
+      const yMin = Math.max(0, Math.round(box.yMin ?? box.topLeft?.[1] ?? 0));
       const w = Math.round(
-        (box.width !== undefined
+        box.width !== undefined
           ? box.width
           : box.bottomRight?.[0] !== undefined
-            ? box.bottomRight[0] - (box.xMin ?? 0)
-            : 0) * scaleX,
+            ? box.bottomRight[0] - xMin
+            : 0,
       );
       const h = Math.round(
-        (box.height !== undefined
+        box.height !== undefined
           ? box.height
           : box.bottomRight?.[1] !== undefined
-            ? box.bottomRight[1] - (box.yMin ?? 0)
-            : 0) * scaleY,
+            ? box.bottomRight[1] - yMin
+            : 0,
       );
       const result: FaceBox = {
         topLeft: [xMin, yMin],
-        bottomRight: [xMin + w, yMin + h],
+        bottomRight: [Math.min(xMin + w, width), Math.min(yMin + h, height)],
       };
       const score = p.score ?? p.probability ?? "n/a";
       console.log(
@@ -253,9 +217,9 @@ async function detectFaces(imageBuffer: Buffer): Promise<FaceBox[]> {
 const PERSON_CLASSES = new Set(["person"]);
 
 async function detectPersons(imageBuffer: Buffer): Promise<FaceBox[]> {
-  const { tensor, width, height, scaleX, scaleY } = await bufferToRgbTensor(imageBuffer);
+  const { tensor, width, height } = await bufferToRgbTensor(imageBuffer);
   console.log(
-    `[FaceDetector:COCO-SSD] Running inference on ${width}x${height} image...`,
+    `[FaceDetector:COCO-SSD] Running inference on ${width}×${height} image...`,
   );
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -289,17 +253,15 @@ async function detectPersons(imageBuffer: Buffer): Promise<FaceBox[]> {
   return persons.map(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (p: any, i: number): FaceBox => {
-      // COCO-SSD: bbox = [x, y, width, height] - auf Originalkoordinaten skalieren
-      const [x, y, w, h] = (p.bbox as [number, number, number, number]).map(
-        (v, idx) => v * (idx % 2 === 0 ? scaleX : scaleY),
-      );
+      // COCO-SSD: bbox = [x, y, width, height]
+      const [x, y, w, h] = p.bbox as [number, number, number, number];
       // Use upper 40% of person bounding box as the "head" focal region
       const headH = Math.round(h * 0.4);
       const result: FaceBox = {
         topLeft: [Math.max(0, Math.round(x)), Math.max(0, Math.round(y))],
         bottomRight: [
-          Math.min(Math.round(x + w), Math.round(width * scaleX)),
-          Math.min(Math.round(y + headH), Math.round(height * scaleY)),
+          Math.min(Math.round(x + w), width),
+          Math.min(Math.round(y + headH), height),
         ],
       };
       console.log(

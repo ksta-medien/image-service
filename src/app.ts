@@ -2,7 +2,6 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { Storage } from '@google-cloud/storage';
-import sharp from 'sharp';
 import { ImageProcessor } from './image-processor';
 import { FaceDetector } from './face-detector';
 import type { ImageProcessingParams } from './types';
@@ -13,15 +12,6 @@ const app = new Hono();
 const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME || 'livingdocs-image-live';
 const GCS_BUCKET_BASE_URL = process.env.GCS_BUCKET_BASE_URL ||
   'https://storage.cloud.google.com/livingdocs-image-live';
-
-// Sharp libvips Thread-Pool begrenzen.
-// Bei containerConcurrency=4 wuerden 4 parallele Requests sonst jeweils
-// alle verfuegbaren libvips-Threads beanspruchen und sich gegenseitig blockieren.
-// Mit concurrency=1 arbeitet jeder Request single-threaded durch libvips,
-// die 4 vCPUs werden ueber die 4 parallelen Container-Requests genutzt.
-const sharpConcurrency = parseInt(process.env.SHARP_CONCURRENCY ?? '1', 10);
-sharp.concurrency(sharpConcurrency);
-console.log(`[startup] sharp.concurrency set to ${sharpConcurrency}`);
 
 // Pre-warm the BlazeFace model in the background so the first request is fast
 FaceDetector.load().catch((err) =>
