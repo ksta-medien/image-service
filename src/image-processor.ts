@@ -33,6 +33,11 @@ export class ImageProcessor {
     if (parts.length !== 4 || parts.some(isNaN)) {
       return null;
     }
+    // Skip rect if width or height is zero — Sharp requires positive integers
+    if (parts[2] <= 0 || parts[3] <= 0) {
+      console.log(`Skipping rect crop with zero dimensions: ${rect}`);
+      return null;
+    }
     return {
       left: parts[0],
       top: parts[1],
