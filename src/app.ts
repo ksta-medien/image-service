@@ -105,8 +105,8 @@ app.get('/:path{.+\\.(jpg|jpeg|png|webp|avif)}', async (c) => {
 
     // Parse image processing parameters
     const params: ImageProcessingParams = {
-      w: c.req.query('w') ? parseInt(c.req.query('w')!, 10) : undefined,
-      h: c.req.query('h') ? parseInt(c.req.query('h')!, 10) : undefined,
+      w: c.req.query('w') ? (parseInt(c.req.query('w')!, 10) || undefined) : undefined,
+      h: c.req.query('h') ? (parseInt(c.req.query('h')!, 10) || undefined) : undefined,
       fm: c.req.query('fm') as ImageProcessingParams['fm'],
       q: c.req.query('q') ? parseInt(c.req.query('q')!, 10) : undefined,
       fit: c.req.query('fit') as ImageProcessingParams['fit'],
@@ -193,8 +193,8 @@ app.get('/image', async (c) => {
 
     // Parse image processing parameters
     const params: ImageProcessingParams = {
-      w: c.req.query('w') ? parseInt(c.req.query('w')!, 10) : undefined,
-      h: c.req.query('h') ? parseInt(c.req.query('h')!, 10) : undefined,
+      w: c.req.query('w') ? (parseInt(c.req.query('w')!, 10) || undefined) : undefined,
+      h: c.req.query('h') ? (parseInt(c.req.query('h')!, 10) || undefined) : undefined,
       fm: c.req.query('fm') as ImageProcessingParams['fm'],
       q: c.req.query('q') ? parseInt(c.req.query('q')!, 10) : undefined,
       fit: c.req.query('fit') as ImageProcessingParams['fit'],
