@@ -5,6 +5,7 @@ import { Storage } from '@google-cloud/storage';
 import sharp from 'sharp';
 import { ImageProcessor } from './image-processor';
 import { FaceDetector } from './face-detector';
+import { imageCache, buildCacheKey } from './image-cache';
 import type { ImageProcessingParams } from './types';
 
 const app = new Hono();
@@ -91,7 +92,8 @@ app.get('/health', (c) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
     bucket: GCS_BUCKET_BASE_URL,
-    faceDetection: FaceDetector.isLoaded() ? 'ready' : 'loading'
+    faceDetection: FaceDetector.isLoaded() ? 'ready' : 'loading',
+    imageCache: imageCache.stats()
   });
 });
 
@@ -118,6 +120,18 @@ app.get('/:path{.+\\.(jpg|jpeg|png|webp|avif)}', async (c) => {
       return c.json({ error: 'Quality must be between 1 and 100' }, 400);
     }
 
+    // --- Cache lookup ---
+    const cacheKey = buildCacheKey(imagePath, params as Record<string, unknown>);
+    const cached = imageCache.get(cacheKey);
+    if (cached) {
+      console.log(`[cache hit] ${cacheKey}`);
+      c.header('Content-Type', cached.contentType);
+      c.header('Cache-Control', 'public, max-age=31536000, immutable');
+      c.header('X-Cache', 'HIT');
+      return c.body(cached.buffer as unknown as string);
+    }
+    console.log(`[cache miss] ${cacheKey}`);
+
     // Fetch the source image from GCS
     let imageBuffer: Buffer;
     try {
@@ -142,9 +156,13 @@ app.get('/:path{.+\\.(jpg|jpeg|png|webp|avif)}', async (c) => {
       // Determine content type
       const contentType = ImageProcessor.getMimeType(params.fm);
 
+      // Store in cache for subsequent requests
+      imageCache.set(cacheKey, processedImage as Buffer, contentType);
+
       // Set caching headers
       c.header('Content-Type', contentType);
       c.header('Cache-Control', 'public, max-age=31536000, immutable');
+      c.header('X-Cache', 'MISS');
 
       return c.body(processedImage as unknown as string);
     } catch (processingError) {
@@ -190,6 +208,18 @@ app.get('/image', async (c) => {
       return c.json({ error: 'Quality must be between 1 and 100' }, 400);
     }
 
+    // --- Cache lookup ---
+    const cacheKey = buildCacheKey(sourceUrl, params as Record<string, unknown>);
+    const cached = imageCache.get(cacheKey);
+    if (cached) {
+      console.log(`[cache hit] ${cacheKey}`);
+      c.header('Content-Type', cached.contentType);
+      c.header('Cache-Control', 'public, max-age=31536000, immutable');
+      c.header('X-Cache', 'HIT');
+      return c.body(cached.buffer as unknown as string);
+    }
+    console.log(`[cache miss] ${cacheKey}`);
+
     // Fetch the source image from GCS
     let imageBuffer: Buffer;
     try {
@@ -219,9 +249,13 @@ app.get('/image', async (c) => {
     // Determine content type
     const contentType = ImageProcessor.getMimeType(params.fm);
 
+    // Store in cache for subsequent requests
+    imageCache.set(cacheKey, processedImage as Buffer, contentType);
+
     // Set caching headers
     c.header('Content-Type', contentType);
     c.header('Cache-Control', 'public, max-age=31536000, immutable');
+    c.header('X-Cache', 'MISS');
 
     return c.body(processedImage as unknown as string);
   } catch (error) {
