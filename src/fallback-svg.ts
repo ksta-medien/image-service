@@ -1,8 +1,14 @@
+import sharp from "sharp";
+import { ImageProcessor } from "./image-processor";
+
 /**
  * SVG fallback image returned when a source image is not found in GCS.
  * Displayed as a 1280×1024 placeholder with a "not available" message.
+ *
+ * The SVG has a viewBox so it scales cleanly to any requested dimension.
  */
-export const FALLBACK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" x="0px" y="0px" viewBox="0 0 1280 1024" style="enable-background:new 0 0 1280 1024;">
+
+const SVG_TEMPLATE = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" x="0px" y="0px" viewBox="0 0 1280 1024" preserveAspectRatio="xMidYMid slice" __DIMS__>
 <style type="text/css">
 	.st0{fill:#F9F9F9;}
 	.st1{fill:#E6E6E6;}
@@ -24,5 +30,112 @@ export const FALLBACK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink
 </g>
 </svg>`;
 
-export const FALLBACK_SVG_BUFFER = Buffer.from(FALLBACK_SVG, 'utf-8');
-export const FALLBACK_CONTENT_TYPE = 'image/svg+xml';
+/** Build an SVG buffer with optional explicit pixel dimensions injected. */
+function buildSvgBuffer(width?: number, height?: number): Buffer {
+  const dims = [
+    width ? `width="${width}"` : "",
+    height ? `height="${height}"` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return Buffer.from(SVG_TEMPLATE.replace("__DIMS__", dims), "utf-8");
+}
+
+export const FALLBACK_CONTENT_TYPE = "image/svg+xml";
+
+/** Default (unsized) SVG fallback — pre-encoded once at startup. */
+export const FALLBACK_SVG_BUFFER = buildSvgBuffer();
+
+/**
+ * Derive target pixel dimensions from w / h / ar query params,
+ * mirroring the logic in ImageProcessor without importing Sharp.
+ */
+export function resolveFallbackDimensions(
+  w?: number,
+  h?: number,
+  ar?: string,
+): { width?: number; height?: number } {
+  let width = w;
+  let height = h;
+
+  if (ar) {
+    const parts = ar.split(":").map(Number);
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      const ratio = parts[0] / parts[1];
+      if (width && !height) height = Math.round(width / ratio);
+      if (height && !width) width = Math.round(height * ratio);
+      if (!width && !height) width = 1280; // SVG native width as default
+    }
+  }
+
+  return { width, height };
+}
+
+/**
+ * Renders the SVG placeholder as a rasterized image in the requested format.
+ *
+ * Falls back to raw SVG if Sharp cannot rasterize (e.g. librsvg not available).
+ *
+ * @param width   Target pixel width
+ * @param height  Target pixel height
+ * @param format  Image format: 'jpg'|'jpeg'|'webp'|'png'|'avif' (default: 'jpg')
+ * @returns       { buffer, contentType }
+ */
+export async function renderFallback(
+  width?: number,
+  height?: number,
+  format?: string,
+): Promise<{ buffer: Buffer; contentType: string }> {
+  const svgBuffer = buildSvgBuffer(width, height);
+
+  // If no raster format is requested, return the SVG as-is
+  const fmt = (format ?? "jpg").toLowerCase();
+  if (fmt === "svg") {
+    return { buffer: svgBuffer, contentType: FALLBACK_CONTENT_TYPE };
+  }
+
+  try {
+    let pipeline = sharp(svgBuffer);
+
+    // Explicitly resize so Sharp reads the SVG at the right resolution
+    if (width || height) {
+      pipeline = pipeline.resize(width, height, { fit: "fill" });
+    }
+
+    const quality = 80;
+    let buffer: Buffer;
+    let contentType: string;
+
+    switch (fmt) {
+      case "avif":
+        buffer = await pipeline.avif({ quality }).toBuffer();
+        contentType = "image/avif";
+        break;
+      case "webp":
+        buffer = await pipeline.webp({ quality }).toBuffer();
+        contentType = "image/webp";
+        break;
+      case "png":
+        buffer = await pipeline.png({ quality }).toBuffer();
+        contentType = "image/png";
+        break;
+      case "jpg":
+      case "jpeg":
+      default:
+        buffer = await pipeline
+          .jpeg({ quality, progressive: true, mozjpeg: false })
+          .toBuffer();
+        contentType = ImageProcessor.getMimeType("jpg");
+        break;
+    }
+
+    return { buffer, contentType };
+  } catch (err) {
+    // librsvg not available or other rasterization error — serve SVG as fallback
+    console.warn(
+      "[FallbackSvg] Could not rasterize SVG, returning raw SVG:",
+      err,
+    );
+    return { buffer: svgBuffer, contentType: FALLBACK_CONTENT_TYPE };
+  }
+}
