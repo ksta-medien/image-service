@@ -310,7 +310,14 @@ export class ImageProcessor {
 
       switch (format.toLowerCase()) {
         case "avif":
-          this.sharp = this.sharp.avif({ quality });
+          // Default libaom speed is 4, which takes 8-12 s on a 2000 px image
+          // and causes Cloud Run 503s under load. Speed 6 cuts encode time to
+          // ~1-2 s with a negligible file-size increase (~5 %).
+          // Configurable via AVIF_SPEED env var (0 = best compression, 9 = fastest).
+          this.sharp = this.sharp.avif({
+            quality,
+            speed: parseInt(process.env.AVIF_SPEED ?? "6", 10),
+          });
           break;
         case "webp":
           this.sharp = this.sharp.webp({ quality });

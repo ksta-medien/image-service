@@ -31,10 +31,12 @@ const GCS_BUCKET_BASE_URL =
   "https://storage.cloud.google.com/livingdocs-image-live";
 
 // Sharp libvips Thread-Pool begrenzen.
-// Bei containerConcurrency=4 wuerden 4 parallele Requests sonst jeweils
+// Bei containerConcurrency=5 wuerden 5 parallele Requests sonst jeweils
 // alle verfuegbaren libvips-Threads beanspruchen und sich gegenseitig blockieren.
 // Mit concurrency=1 arbeitet jeder Request single-threaded durch libvips,
-// die 4 vCPUs werden ueber die 4 parallelen Container-Requests genutzt.
+// die 6 vCPUs werden ueber die 5 parallelen Container-Requests genutzt.
+// AVIF-Encoding-Latenz wird durch den speed-Parameter in image-processor.ts
+// gesteuert, nicht durch concurrency.
 const sharpConcurrency = parseInt(process.env.SHARP_CONCURRENCY ?? "1", 10);
 sharp.concurrency(sharpConcurrency);
 console.log(`[startup] sharp.concurrency set to ${sharpConcurrency}`);
