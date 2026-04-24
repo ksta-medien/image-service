@@ -14,6 +14,8 @@ import {
 export class ImageProcessor {
   private sharp: Sharp;
   private originalBuffer: Buffer;
+  /** Rect that was actually applied in Step 1 (clamped, or null if none). */
+  private appliedRect: { left: number; top: number; width: number; height: number } | null = null;
 
   constructor(imageBuffer: Buffer) {
     this.originalBuffer = imageBuffer;
@@ -174,6 +176,7 @@ export class ImageProcessor {
             }
             console.log("Applying rect crop:", clamped);
             this.sharp = this.sharp.extract(clamped);
+            this.appliedRect = clamped;
           } else {
             console.warn(`Rect skipped after clamping — zero dimensions (image: ${imgW}x${imgH}, rect: ${JSON.stringify(rect)})`);
           }
@@ -229,8 +232,23 @@ export class ImageProcessor {
 
         // Real face detection: when crop=faces, locate faces and use their
         // centroid as a focal point for the cover-crop. The region is extracted
-        // from the ORIGINAL image at the target aspect ratio – no extra zoom.
+        // from the image at the target aspect ratio – no extra zoom.
+        //
+        // IMPORTANT: face detection always runs on the original buffer (better
+        // model accuracy on the full-resolution image). The returned coordinates
+        // are in original-image space, so we must:
+        //   1. Subtract the applied rect offset to get rect-relative coordinates.
+        //   2. Use the post-rect dimensions (not the original metadata dimensions)
+        //      as the source size for computeFocalCrop, otherwise the computed
+        //      region can exceed the already-cropped image bounds and Sharp will
+        //      throw "bad extract area".
         if (ImageProcessor.wantsFaceCrop(params.crop)) {
+          // Determine effective dimensions and coordinate offset after rect crop
+          const effectiveW = this.appliedRect ? this.appliedRect.width  : (metadata.width  ?? 0);
+          const effectiveH = this.appliedRect ? this.appliedRect.height : (metadata.height ?? 0);
+          const offsetX    = this.appliedRect ? this.appliedRect.left   : 0;
+          const offsetY    = this.appliedRect ? this.appliedRect.top    : 0;
+
           try {
             const faces = await FaceDetector.detect(this.originalBuffer);
             const center = computeFaceCenter(
@@ -240,22 +258,26 @@ export class ImageProcessor {
             );
 
             if (center) {
+              // Translate face-center from original-image space into post-rect space
+              const adjustedFx = center.x - offsetX;
+              const adjustedFy = center.y - offsetY;
+
               const region = computeFocalCrop(
-                metadata.width ?? 0,
-                metadata.height ?? 0,
+                effectiveW,
+                effectiveH,
                 finalWidth,
                 finalHeight,
-                center.x,
-                center.y,
+                adjustedFx,
+                adjustedFy,
               );
 
               if (region) {
                 console.log(
-                  "[FaceDetector] Focal-point extract region:",
-                  region,
+                  "[FaceDetector] Focal-point extract region:", region,
+                  `(effective src: ${effectiveW}x${effectiveH}, offset: ${offsetX},${offsetY}, adjusted center: ${adjustedFx},${adjustedFy})`,
                 );
-                // extract() clips the original to the right AR centered on the face;
-                // the following resize() only scales – no second crop, no zoom.
+                // extract() clips the already-rect-cropped image to the right AR
+                // centered on the face; the following resize() only scales.
                 this.sharp = this.sharp.extract(region);
               }
               // position is irrelevant after extract, but set for safety
