@@ -86,6 +86,46 @@ let faceModel: any = null;
 let personModel: any = null;
 let modelsLoading: Promise<void> | null = null;
 
+// ---------------------------------------------------------------------------
+// Inference semaphore
+// ---------------------------------------------------------------------------
+// TF.js WASM runs synchronously on the JS event loop. Allowing N concurrent
+// inferences (where N = containerConcurrency) just serializes them in the WASM
+// engine anyway, but stacks up tensor allocations and blocks the loop for
+// N × inferenceTime milliseconds — causing Cloud Run to see "connection errors"
+// (503). A semaphore of 1 queues excess requests rather than piling them up.
+const INFERENCE_CONCURRENCY = parseInt(
+  process.env.FACE_DETECTION_CONCURRENCY ?? "1",
+  10,
+);
+
+let inferenceActive = 0;
+const inferenceWaiters: Array<() => void> = [];
+
+function acquireInference(): Promise<void> {
+  if (inferenceActive < INFERENCE_CONCURRENCY) {
+    inferenceActive++;
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => inferenceWaiters.push(resolve));
+}
+
+function releaseInference(): void {
+  const next = inferenceWaiters.shift();
+  if (next) {
+    next(); // hand the slot to the next waiter (inferenceActive stays the same)
+  } else {
+    inferenceActive--;
+  }
+}
+
+// Maximum milliseconds to wait for models + inference before falling back to
+// the entropy strategy.  Must stay well below Cloud Run's timeoutSeconds (20 s).
+const FACE_DETECTION_TIMEOUT_MS = parseInt(
+  process.env.FACE_DETECTION_TIMEOUT_MS ?? "8000",
+  10,
+);
+
 async function initBackend(): Promise<void> {
   const tf = await import("@tensorflow/tfjs-core");
   await import("@tensorflow/tfjs-backend-wasm");
@@ -343,6 +383,31 @@ export class FaceDetector {
   }
 
   static async detect(imageBuffer: Buffer): Promise<FaceBox[]> {
+    // Race the full detection pipeline against a hard timeout so that slow
+    // model loads or queued inferences never let a request exceed Cloud Run's
+    // timeoutSeconds limit.
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<FaceBox[]>((resolve) => {
+      timeoutHandle = setTimeout(() => {
+        console.warn(
+          `[FaceDetector] Detection timed out after ${FACE_DETECTION_TIMEOUT_MS} ms — falling back to entropy.`,
+        );
+        resolve([]);
+      }, FACE_DETECTION_TIMEOUT_MS);
+    });
+
+    const detectionPromise = FaceDetector._detect(imageBuffer).finally(() => {
+      clearTimeout(timeoutHandle);
+    });
+
+    return Promise.race([detectionPromise, timeoutPromise]);
+  }
+
+  /** Internal implementation — called by detect() under the timeout guard. */
+  private static async _detect(imageBuffer: Buffer): Promise<FaceBox[]> {
+    // Acquire inference slot — queues this call if INFERENCE_CONCURRENCY is
+    // already reached, rather than stacking concurrent WASM executions.
+    await acquireInference();
     try {
       await loadModels();
 
@@ -398,6 +463,8 @@ export class FaceDetector {
     } catch (err) {
       console.error("[FaceDetector] Detection error, falling back:", err);
       return [];
+    } finally {
+      releaseInference();
     }
   }
 
