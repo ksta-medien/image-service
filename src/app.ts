@@ -6,6 +6,7 @@ import sharp from 'sharp';
 import { ImageProcessor } from './image-processor';
 import { FaceDetector } from './face-detector';
 import { imageCache, buildCacheKey } from './image-cache';
+import { FALLBACK_SVG_BUFFER, FALLBACK_CONTENT_TYPE } from './fallback-svg';
 import type { ImageProcessingParams } from './types';
 
 const app = new Hono();
@@ -138,7 +139,10 @@ app.get('/:path{.+\\.(jpg|jpeg|png|webp|avif)}', async (c) => {
       imageBuffer = await fetchImageFromGCS(imagePath);
     } catch (fetchError) {
       if (fetchError instanceof NotFoundError) {
-        return c.json({ error: 'Image not found', path: imagePath }, 404);
+        console.warn(`[404] Image not found, returning SVG fallback: ${imagePath}`);
+        c.header('Content-Type', FALLBACK_CONTENT_TYPE);
+        c.header('Cache-Control', 'public, max-age=300'); // short TTL for fallbacks
+        return c.body(FALLBACK_SVG_BUFFER as unknown as string);
       }
       console.error(`Failed to fetch image from GCS:`, fetchError);
       return c.json({
@@ -237,6 +241,12 @@ app.get('/image', async (c) => {
         imageBuffer = await fetchImageFromGCS(sourceUrl);
       }
     } catch (fetchError) {
+      if (fetchError instanceof NotFoundError) {
+        console.warn(`[404] Image not found, returning SVG fallback: ${sourceUrl}`);
+        c.header('Content-Type', FALLBACK_CONTENT_TYPE);
+        c.header('Cache-Control', 'public, max-age=300');
+        return c.body(FALLBACK_SVG_BUFFER as unknown as string);
+      }
       return c.json({
         error: `Failed to fetch image: ${fetchError instanceof Error ? fetchError.message : 'Unknown error'}`
       }, 502);
