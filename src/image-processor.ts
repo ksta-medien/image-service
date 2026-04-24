@@ -158,8 +158,25 @@ export class ImageProcessor {
       if (params.rect) {
         const rect = this.parseRect(params.rect);
         if (rect) {
-          console.log("Applying rect crop:", rect);
-          this.sharp = this.sharp.extract(rect);
+          const imgW = metadata.width ?? 0;
+          const imgH = metadata.height ?? 0;
+
+          // Clamp rect to actual image bounds to avoid "bad extract area" from Sharp
+          const left   = Math.max(0, Math.min(rect.left,  imgW - 1));
+          const top    = Math.max(0, Math.min(rect.top,   imgH - 1));
+          const width  = Math.min(rect.width,  imgW - left);
+          const height = Math.min(rect.height, imgH - top);
+
+          if (width > 0 && height > 0) {
+            const clamped = { left, top, width, height };
+            if (left !== rect.left || top !== rect.top || width !== rect.width || height !== rect.height) {
+              console.warn(`Rect clamped from ${JSON.stringify(rect)} to ${JSON.stringify(clamped)} (image: ${imgW}x${imgH})`);
+            }
+            console.log("Applying rect crop:", clamped);
+            this.sharp = this.sharp.extract(clamped);
+          } else {
+            console.warn(`Rect skipped after clamping — zero dimensions (image: ${imgW}x${imgH}, rect: ${JSON.stringify(rect)})`);
+          }
         }
       }
 
