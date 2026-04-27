@@ -106,8 +106,10 @@ jobs:
             --project ${{ env.PROJECT_ID }} \
             --allow-unauthenticated \
             --port 8080 \
-            --timeout 120 \
-            --set-env-vars="GCS_BUCKET_NAME=${{ matrix.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ matrix.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=1024,SHARP_CONCURRENCY=4,AVIF_SPEED=6"
+            --no-cpu-throttling \
+            --concurrency 3 \
+            --timeout 30 \
+            --set-env-vars="GCS_BUCKET_NAME=${{ matrix.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ matrix.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=512,SHARP_CONCURRENCY=1,AVIF_SPEED=6"
 
       - name: Get service URL
         run: |
@@ -193,8 +195,10 @@ jobs:
             --project ${{ env.PROJECT_ID }} \
             --allow-unauthenticated \
             --port 8080 \
-            --timeout 120 \
-            --set-env-vars="GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ env.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=1024,SHARP_CONCURRENCY=4,AVIF_SPEED=6"
+            --no-cpu-throttling \
+            --concurrency 3 \
+            --timeout 30 \
+            --set-env-vars="GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ env.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=512,SHARP_CONCURRENCY=1,AVIF_SPEED=6"
 
       - name: Get service URL
         run: |
@@ -258,8 +262,10 @@ jobs:
             --project ${{ env.PROJECT_ID }} \
             --allow-unauthenticated \
             --port 8080 \
-            --timeout 120 \
-            --set-env-vars="GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ env.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=512,SHARP_CONCURRENCY=4,AVIF_SPEED=6"
+            --no-cpu-throttling \
+            --concurrency 3 \
+            --timeout 30 \
+            --set-env-vars="GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ env.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=512,SHARP_CONCURRENCY=1,AVIF_SPEED=6"
 
       - name: Get service URL
         run: |
