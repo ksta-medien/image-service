@@ -262,10 +262,7 @@ jobs:
             --project ${{ env.PROJECT_ID }} \
             --allow-unauthenticated \
             --port 8080 \
-            --no-cpu-throttling \
-            --concurrency 3 \
-            --timeout 30 \
-            --set-env-vars="GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ env.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=512,SHARP_CONCURRENCY=1,AVIF_SPEED=6"
+            --set-env-vars="GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ env.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=512,SHARP_CONCURRENCY=4,AVIF_SPEED=6"
 
       - name: Get service URL
         run: |
