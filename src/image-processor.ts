@@ -214,11 +214,20 @@ export class ImageProcessor {
             finalWidth = dimensions.width;
             finalHeight = dimensions.height;
           } else {
+            // No target w or h — derive output size from the source dimensions
+            // and the requested aspect ratio.
+            // If a rect crop was applied in Step 1, use the cropped region's
+            // dimensions (already stored in this.appliedRect) rather than the
+            // original image metadata, otherwise the output size would be
+            // based on the full pre-crop image and produce wrong proportions.
+            const sourceMeta = this.appliedRect
+              ? { width: this.appliedRect.width, height: this.appliedRect.height }
+              : metadata;
             const dimensions = await this.calculateAspectRatioDimensions(
               ar,
               undefined,
               undefined,
-              metadata,
+              sourceMeta,
             );
             finalWidth = dimensions.width;
             finalHeight = dimensions.height;
