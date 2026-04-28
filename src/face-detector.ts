@@ -1,4 +1,8 @@
 import sharp from "sharp";
+import { Worker } from "worker_threads";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+import type { WorkerRequest, WorkerResponse } from "./face-detector-worker";
 
 /**
  * Bounding box einer erkannten Region (Gesicht oder Person) in Pixeln.
@@ -77,28 +81,66 @@ export function computeFocalCrop(
 }
 
 // ---------------------------------------------------------------------------
-// Interne Modell-Singletons
+// Worker thread pool
+// ---------------------------------------------------------------------------
+// TF.js WASM runs synchronously and blocks the JS event loop for the full
+// inference duration (~60–300 ms). Moving inference into a Worker thread lets
+// the main event loop continue serving other requests while the GPU-less WASM
+// engine works in the background.
+//
+// Pool size is controlled by FACE_DETECTION_CONCURRENCY (default 1).
+// A semaphore limits concurrent dispatches to the pool size.
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let faceModel: any = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let personModel: any = null;
-let modelsLoading: Promise<void> | null = null;
-
-// ---------------------------------------------------------------------------
-// Inference semaphore
-// ---------------------------------------------------------------------------
-// TF.js WASM runs synchronously on the JS event loop. Allowing N concurrent
-// inferences (where N = containerConcurrency) just serializes them in the WASM
-// engine anyway, but stacks up tensor allocations and blocks the loop for
-// N × inferenceTime milliseconds — causing Cloud Run to see "connection errors"
-// (503). A semaphore of 1 queues excess requests rather than piling them up.
 const INFERENCE_CONCURRENCY = parseInt(
   process.env.FACE_DETECTION_CONCURRENCY ?? "1",
   10,
 );
 
+const FACE_DETECTION_TIMEOUT_MS = parseInt(
+  process.env.FACE_DETECTION_TIMEOUT_MS ?? "8000",
+  10,
+);
+
+// Resolve absolute path to the worker file.
+// Works for both `bun src/face-detector.ts` and after `bun build`.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const WORKER_PATH = join(__dirname, "face-detector-worker.ts");
+
+/** Create a fresh Worker and attach a one-time error/exit guard. */
+function createWorker(): Worker {
+  return new Worker(WORKER_PATH, {
+    // Bun supports running .ts workers directly.
+    // Node 22+ also supports --experimental-strip-types but Bun is the target.
+  });
+}
+
+// Lazy singleton worker — created on first use, recycled thereafter.
+let workerInstance: Worker | null = null;
+let workerReady = false;
+
+function getWorker(): Worker {
+  if (!workerInstance || !workerReady) {
+    workerInstance = createWorker();
+    workerReady = true;
+    workerInstance.on("error", (err) => {
+      console.error("[FaceDetector] Worker error:", err);
+      workerReady = false;
+      workerInstance = null;
+    });
+    workerInstance.on("exit", (code) => {
+      if (code !== 0) {
+        console.warn(`[FaceDetector] Worker exited with code ${code}`);
+      }
+      workerReady = false;
+      workerInstance = null;
+    });
+  }
+  return workerInstance;
+}
+
+// Semaphore — limits concurrent dispatches to INFERENCE_CONCURRENCY slots.
 let inferenceActive = 0;
 const inferenceWaiters: Array<() => void> = [];
 
@@ -113,280 +155,91 @@ function acquireInference(): Promise<void> {
 function releaseInference(): void {
   const next = inferenceWaiters.shift();
   if (next) {
-    next(); // hand the slot to the next waiter (inferenceActive stays the same)
+    next();
   } else {
     inferenceActive--;
   }
 }
 
-// Maximum milliseconds to wait for models + inference before falling back to
-// the entropy strategy.  Must stay well below Cloud Run's timeoutSeconds (20 s).
-const FACE_DETECTION_TIMEOUT_MS = parseInt(
-  process.env.FACE_DETECTION_TIMEOUT_MS ?? "8000",
-  10,
-);
+// Monotonically increasing request ID for matching responses to promises.
+let nextRequestId = 0;
+const pendingRequests = new Map<
+  number,
+  { resolve: (faces: FaceBox[]) => void; reject: (err: Error) => void }
+>();
 
-async function initBackend(): Promise<void> {
-  const tf = await import("@tensorflow/tfjs-core");
-  await import("@tensorflow/tfjs-backend-wasm");
-  await import("@tensorflow/tfjs-converter");
-  await tf.setBackend("wasm");
-  await tf.ready();
-}
-
-/**
- * Lädt beide Modelle einmalig (gecacht).
- * - MediaPipe Face Detector (Full Range) — Stufe 1
- * - COCO-SSD — Stufe 2 (Person-Fallback)
- */
-async function loadModels(): Promise<void> {
-  if (faceModel && personModel) return;
-
-  if (modelsLoading) {
-    await modelsLoading;
-    return;
-  }
-
-  modelsLoading = (async () => {
-    console.log("[FaceDetector] Initialising WASM backend...");
-    await initBackend();
-
-    console.log(
-      "[FaceDetector] Loading MediaPipe Face Detector (full range)...",
-    );
-    const faceDetection = await import("@tensorflow-models/face-detection");
-    faceModel = await faceDetection.createDetector(
-      faceDetection.SupportedModels.MediaPipeFaceDetector,
-      {
-        runtime: "tfjs",
-        modelType: "full", // erkennt kleine, entfernte Gesichter besser als 'short'
-      },
-    );
-    console.log("[FaceDetector] Face model ready.");
-
-    console.log("[FaceDetector] Loading COCO-SSD (person fallback)...");
-    const cocoSsd = await import("@tensorflow-models/coco-ssd");
-    personModel = await cocoSsd.load({ base: "mobilenet_v2" });
-    console.log("[FaceDetector] COCO-SSD ready.");
-  })();
-
-  await modelsLoading;
-}
-
-// ---------------------------------------------------------------------------
-// Hilfsfunktion: Sharp-Buffer → RGB Tensor
-// ---------------------------------------------------------------------------
-
-// Maximale Eingangsbreite fuer TensorFlow-Inferenz.
-// Groessere Bilder werden proportional verkleinert bevor sie dem Modell
-// uebergeben werden. Gesichtspositionen werden zurueckskaliert.
-// Konfigurierbar ueber FACE_DETECTION_MAX_INPUT_WIDTH (Default: 640).
-const FACE_DETECTION_MAX_INPUT_WIDTH = parseInt(
-  process.env.FACE_DETECTION_MAX_INPUT_WIDTH ?? "640",
-  10,
-);
-
-async function bufferToRgbTensor(imageBuffer: Buffer): Promise<{
-  tensor: Awaited<
-    ReturnType<(typeof import("@tensorflow/tfjs-core"))["tensor3d"]>
-  >;
-  width: number;
-  height: number;
-  scaleX: number;
-  scaleY: number;
-}> {
-  const tf = await import("@tensorflow/tfjs-core");
-
-  // Originaldimensionen lesen ohne vollstaendiges Dekodieren
-  const meta = await sharp(imageBuffer).metadata();
-  const origWidth = meta.width ?? FACE_DETECTION_MAX_INPUT_WIDTH;
-  const origHeight = meta.height ?? FACE_DETECTION_MAX_INPUT_WIDTH;
-
-  // Bild auf Maximalbreite begrenzen um Inferenzzeit zu reduzieren.
-  // Auf einem 4MP-Bild (2000x2000px) dauert MediaPipe ~300ms,
-  // auf 640px ~60ms. Gesichter sind auch auf 640px zuverlaessig erkennbar.
-  let inferenceWidth = origWidth;
-  let inferenceHeight = origHeight;
-  if (origWidth > FACE_DETECTION_MAX_INPUT_WIDTH) {
-    const scale = FACE_DETECTION_MAX_INPUT_WIDTH / origWidth;
-    inferenceWidth = FACE_DETECTION_MAX_INPUT_WIDTH;
-    inferenceHeight = Math.round(origHeight * scale);
-  }
-
-  const resizePipeline = sharp(imageBuffer).removeAlpha();
-  if (inferenceWidth !== origWidth) {
-    resizePipeline.resize(inferenceWidth, inferenceHeight, { fit: "fill" });
-  }
-
-  const { data, info } = await resizePipeline
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-
-  return {
-    tensor: tf.tensor3d(new Uint8Array(data), [info.height, info.width, 3]),
-    width: info.width,
-    height: info.height,
-    // Skalierungsfaktoren um erkannte Boxen auf Originalkoordinaten zurueckzurechnen
-    scaleX: origWidth / info.width,
-    scaleY: origHeight / info.height,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Stufe 1 – MediaPipe Face Detector
-// ---------------------------------------------------------------------------
-
-async function detectFaces(imageBuffer: Buffer): Promise<FaceBox[]> {
-  const { tensor, width, height, scaleX, scaleY } =
-    await bufferToRgbTensor(imageBuffer);
-  console.log(
-    `[FaceDetector:MediaPipe] Running inference on ${width}x${height} image (scaleX=${scaleX.toFixed(2)}, scaleY=${scaleY.toFixed(2)})...`,
-  );
-
+function attachResponseHandler(worker: Worker): void {
+  // Only attach once — guard with a flag on the worker object.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const predictions: any[] = await faceModel.estimateFaces(tensor);
-  tensor.dispose();
-
-  if (!predictions || predictions.length === 0) {
-    console.log("[FaceDetector:MediaPipe] Result: 0 faces detected.");
-    return [];
-  }
-
-  console.log(
-    `[FaceDetector:MediaPipe] Result: ${predictions.length} face(s) detected.`,
-  );
-
-  const boxes = predictions.map(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (p: any, i: number): FaceBox => {
-      const box = p.box ?? p.boundingBox ?? p;
-      const xMin = Math.max(
-        0,
-        Math.round((box.xMin ?? box.topLeft?.[0] ?? 0) * scaleX),
-      );
-      const yMin = Math.max(
-        0,
-        Math.round((box.yMin ?? box.topLeft?.[1] ?? 0) * scaleY),
-      );
-      const w = Math.round(
-        (box.width !== undefined
-          ? box.width
-          : box.bottomRight?.[0] !== undefined
-            ? box.bottomRight[0] - (box.xMin ?? 0)
-            : 0) * scaleX,
-      );
-      const h = Math.round(
-        (box.height !== undefined
-          ? box.height
-          : box.bottomRight?.[1] !== undefined
-            ? box.bottomRight[1] - (box.yMin ?? 0)
-            : 0) * scaleY,
-      );
-      const result: FaceBox = {
-        topLeft: [xMin, yMin],
-        bottomRight: [xMin + w, yMin + h],
-      };
-      const score = p.score ?? p.probability ?? "n/a";
-      console.log(
-        `[FaceDetector:MediaPipe]   Face ${i + 1}: topLeft=(${result.topLeft}) bottomRight=(${result.bottomRight}) score=${typeof score === "number" ? score.toFixed(3) : score}`,
-      );
-      return result;
-    },
-  );
-
-  return boxes;
-}
-
-// ---------------------------------------------------------------------------
-// Stufe 2 – COCO-SSD Person-Fallback
-// ---------------------------------------------------------------------------
-
-const PERSON_CLASSES = new Set(["person"]);
-
-async function detectPersons(imageBuffer: Buffer): Promise<FaceBox[]> {
-  const { tensor, width, height, scaleX, scaleY } =
-    await bufferToRgbTensor(imageBuffer);
-  console.log(
-    `[FaceDetector:COCO-SSD] Running inference on ${width}x${height} image...`,
-  );
-
+  if ((worker as any).__listenerAttached) return;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const predictions: any[] = await personModel.detect(tensor);
-  tensor.dispose();
+  (worker as any).__listenerAttached = true;
 
-  console.log(
-    `[FaceDetector:COCO-SSD] Raw detections: ${predictions.length} total → ` +
-      predictions
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .map((p: any) => `${p.class}(${p.score.toFixed(2)})`)
-        .join(", ") || "(none)",
-  );
+  worker.on("message", (msg: WorkerResponse) => {
+    const pending = pendingRequests.get(msg.id);
+    if (!pending) return;
+    pendingRequests.delete(msg.id);
 
-  const persons = predictions.filter(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (p: any) => PERSON_CLASSES.has(p.class) && p.score >= 0.4,
-  );
-
-  if (persons.length === 0) {
-    console.log(
-      "[FaceDetector:COCO-SSD] Result: 0 persons above threshold (score >= 0.4).",
-    );
-    return [];
-  }
-
-  console.log(
-    `[FaceDetector:COCO-SSD] Result: ${persons.length} person(s) above threshold.`,
-  );
-
-  return persons.map(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (p: any, i: number): FaceBox => {
-      // COCO-SSD: bbox = [x, y, width, height] - auf Originalkoordinaten skalieren
-      const [x, y, w, h] = (p.bbox as [number, number, number, number]).map(
-        (v, idx) => v * (idx % 2 === 0 ? scaleX : scaleY),
-      );
-      // Use upper 40% of person bounding box as the "head" focal region
-      const headH = Math.round(h * 0.4);
-      const result: FaceBox = {
-        topLeft: [Math.max(0, Math.round(x)), Math.max(0, Math.round(y))],
-        bottomRight: [
-          Math.min(Math.round(x + w), Math.round(width * scaleX)),
-          Math.min(Math.round(y + headH), Math.round(height * scaleY)),
-        ],
-      };
-      console.log(
-        `[FaceDetector:COCO-SSD]   Person ${i + 1}: score=${p.score.toFixed(3)} fullBox=[${Math.round(x)},${Math.round(y)},${Math.round(w)},${Math.round(h)}] headRegion topLeft=(${result.topLeft}) bottomRight=(${result.bottomRight})`,
-      );
-      return result;
-    },
-  );
+    if ("error" in msg) {
+      pending.reject(new Error(msg.error));
+    } else {
+      pending.resolve(msg.faces as FaceBox[]);
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
-// Öffentliche API
+// Pre-warm: load TF models inside the worker at startup.
+// We send a tiny 1×1 PNG so model loading happens before the first real request.
 // ---------------------------------------------------------------------------
 
-/**
- * Kaskadierende Gesichts- und Personenerkennung:
- *
- * 1. MediaPipe Face Detector (Full Range) – erkennt Gesichter inkl. kleiner,
- *    entfernter und leicht seitlicher Aufnahmen
- * 2. COCO-SSD Person-Detector – Fallback wenn keine Gesichter erkannt wurden;
- *    verwendet den oberen Bereich der Personen-Box als Fokusregion
- *
- * Gibt [] zurück wenn weder Gesichter noch Personen gefunden werden.
- * Gibt immer [] bei Fehlern zurück (Service bleibt stabil).
- */
+let preWarmDone = false;
+
+async function preWarmWorker(): Promise<void> {
+  if (preWarmDone) return;
+  preWarmDone = true;
+  try {
+    // 1×1 transparent PNG — minimal valid image to trigger model load
+    const tinyPng = await sharp({
+      create: { width: 1, height: 1, channels: 3, background: { r: 0, g: 0, b: 0 } },
+    })
+      .png()
+      .toBuffer();
+    await FaceDetector.detect(tinyPng, { width: 1, height: 1 });
+    console.log("[FaceDetector] Worker pre-warm complete.");
+  } catch (err) {
+    console.warn("[FaceDetector] Worker pre-warm failed (non-fatal):", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 export class FaceDetector {
+  /** Pre-warm the worker so the first real request doesn't pay model-load cost. */
   static async load(): Promise<void> {
-    await loadModels();
+    await preWarmWorker();
   }
 
-  static async detect(imageBuffer: Buffer): Promise<FaceBox[]> {
-    // Race the full detection pipeline against a hard timeout so that slow
-    // model loads or queued inferences never let a request exceed Cloud Run's
-    // timeoutSeconds limit.
+  static isLoaded(): boolean {
+    return workerInstance !== null && workerReady;
+  }
+
+  /**
+   * Detect faces/persons in `imageBuffer`.
+   * Runs in a Worker thread — never blocks the main event loop.
+   * Falls back to [] on timeout or error.
+   *
+   * @param imageBuffer  Raw image buffer (any format Sharp can read)
+   * @param preReadMeta  Optional pre-read { width, height } to skip a metadata call in the worker
+   */
+  static async detect(
+    imageBuffer: Buffer,
+    preReadMeta?: { width?: number; height?: number },
+  ): Promise<FaceBox[]> {
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
     const timeoutPromise = new Promise<FaceBox[]>((resolve) => {
       timeoutHandle = setTimeout(() => {
         console.warn(
@@ -396,79 +249,45 @@ export class FaceDetector {
       }, FACE_DETECTION_TIMEOUT_MS);
     });
 
-    const detectionPromise = FaceDetector._detect(imageBuffer).finally(() => {
+    const detectionPromise = FaceDetector._detect(imageBuffer, preReadMeta).finally(() => {
       clearTimeout(timeoutHandle);
     });
 
     return Promise.race([detectionPromise, timeoutPromise]);
   }
 
-  /** Internal implementation — called by detect() under the timeout guard. */
-  private static async _detect(imageBuffer: Buffer): Promise<FaceBox[]> {
-    // Acquire inference slot — queues this call if INFERENCE_CONCURRENCY is
-    // already reached, rather than stacking concurrent WASM executions.
+  private static async _detect(
+    imageBuffer: Buffer,
+    preReadMeta?: { width?: number; height?: number },
+  ): Promise<FaceBox[]> {
     await acquireInference();
     try {
-      await loadModels();
+      console.log(`[FaceDetector] detect() — buffer: ${imageBuffer.length} bytes`);
 
-      console.log(
-        `[FaceDetector] detect() called — buffer size: ${imageBuffer.length} bytes`,
-      );
+      const worker = getWorker();
+      attachResponseHandler(worker);
 
-      // Stufe 1: MediaPipe Face Detector
-      const faces = await detectFaces(imageBuffer);
-      if (faces.length > 0) {
-        const cx = Math.round(
-          faces.reduce((s, f) => s + (f.topLeft[0] + f.bottomRight[0]) / 2, 0) /
-            faces.length,
-        );
-        const cy = Math.round(
-          faces.reduce((s, f) => s + (f.topLeft[1] + f.bottomRight[1]) / 2, 0) /
-            faces.length,
-        );
-        console.log(
-          `[FaceDetector] ✓ Model used: MediaPipe | Boxes: ${faces.length} | Focal point: (${cx}, ${cy})`,
-        );
-        return faces;
-      }
+      const id = nextRequestId++;
+      const req: WorkerRequest = {
+        id,
+        buffer: imageBuffer.buffer.slice(
+          imageBuffer.byteOffset,
+          imageBuffer.byteOffset + imageBuffer.byteLength,
+        ) as ArrayBuffer,
+        width: preReadMeta?.width,
+        height: preReadMeta?.height,
+      };
 
-      // Stufe 2: COCO-SSD Person-Fallback
-      console.log(
-        "[FaceDetector] → No faces found, switching to COCO-SSD person detection...",
-      );
-      const persons = await detectPersons(imageBuffer);
-      if (persons.length > 0) {
-        const cx = Math.round(
-          persons.reduce(
-            (s, f) => s + (f.topLeft[0] + f.bottomRight[0]) / 2,
-            0,
-          ) / persons.length,
-        );
-        const cy = Math.round(
-          persons.reduce(
-            (s, f) => s + (f.topLeft[1] + f.bottomRight[1]) / 2,
-            0,
-          ) / persons.length,
-        );
-        console.log(
-          `[FaceDetector] ✓ Model used: COCO-SSD (person fallback) | Boxes: ${persons.length} | Focal point: (${cx}, ${cy})`,
-        );
-        return persons;
-      }
-
-      console.log(
-        "[FaceDetector] ✗ No faces or persons detected → entropy fallback will be used.",
-      );
-      return [];
+      return await new Promise<FaceBox[]>((resolve, reject) => {
+        pendingRequests.set(id, { resolve, reject });
+        // Transfer the ArrayBuffer to avoid copying (zero-copy)
+        worker.postMessage(req, [req.buffer]);
+      });
     } catch (err) {
       console.error("[FaceDetector] Detection error, falling back:", err);
       return [];
     } finally {
       releaseInference();
     }
-  }
-
-  static isLoaded(): boolean {
-    return faceModel !== null && personModel !== null;
   }
 }
