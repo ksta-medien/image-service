@@ -120,6 +120,23 @@ function createWorker(): Worker {
 let workerInstance: Worker | null = null;
 let workerReady = false;
 
+/**
+ * Reject all in-flight requests and reset the semaphore after a worker crash
+ * or unexpected exit. Without this, callers would hang indefinitely and
+ * inferenceActive would never reach 0, blocking all future requests.
+ */
+function drainPendingRequests(reason: Error): void {
+  for (const [id, { reject }] of pendingRequests) {
+    pendingRequests.delete(id);
+    reject(reason);
+  }
+  // Reset the semaphore — the worker is gone so active slots are meaningless.
+  inferenceActive = 0;
+  // Wake any waiters so they can proceed (they will spin up a new worker).
+  const waiters = inferenceWaiters.splice(0);
+  for (const wake of waiters) wake();
+}
+
 function getWorker(): Worker {
   if (!workerInstance || !workerReady) {
     workerInstance = createWorker();
@@ -128,6 +145,7 @@ function getWorker(): Worker {
       console.error("[FaceDetector] Worker error:", err);
       workerReady = false;
       workerInstance = null;
+      drainPendingRequests(new Error(`Face detection worker crashed: ${err.message}`));
     });
     workerInstance.on("exit", (code) => {
       if (code !== 0) {
@@ -135,6 +153,9 @@ function getWorker(): Worker {
       }
       workerReady = false;
       workerInstance = null;
+      if (pendingRequests.size > 0) {
+        drainPendingRequests(new Error(`Face detection worker exited unexpectedly (code ${code})`));
+      }
     });
   }
   return workerInstance;

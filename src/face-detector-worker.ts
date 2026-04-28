@@ -79,7 +79,14 @@ async function loadModels(): Promise<void> {
     const cocoSsd = await import("@tensorflow-models/coco-ssd");
     personModel = await cocoSsd.load({ base: "mobilenet_v2" });
     console.log("[FaceWorker] COCO-SSD ready.");
-  })();
+  })().catch((err) => {
+    // Clear the sentinel so the next call can retry rather than re-throwing
+    // from a permanently rejected promise.
+    modelsLoading = null;
+    faceModel = null;
+    personModel = null;
+    throw err;
+  });
   await modelsLoading;
 }
 
@@ -94,8 +101,13 @@ async function bufferToRgbTensor(
 ) {
   const tf = await import("@tensorflow/tfjs-core");
 
-  const origWidth = preWidth ?? (await sharp(imageBuffer).metadata()).width ?? FACE_DETECTION_MAX_INPUT_WIDTH;
-  const origHeight = preHeight ?? (await sharp(imageBuffer).metadata()).height ?? FACE_DETECTION_MAX_INPUT_WIDTH;
+  // Read metadata at most once — only when the caller didn't supply both dimensions.
+  const meta =
+    preWidth === undefined || preHeight === undefined
+      ? await sharp(imageBuffer).metadata()
+      : null;
+  const origWidth = preWidth ?? meta?.width ?? FACE_DETECTION_MAX_INPUT_WIDTH;
+  const origHeight = preHeight ?? meta?.height ?? FACE_DETECTION_MAX_INPUT_WIDTH;
 
   let inferenceWidth = origWidth;
   let inferenceHeight = origHeight;
@@ -129,8 +141,14 @@ async function detectFaces(imageBuffer: Buffer, preWidth?: number, preHeight?: n
   console.log(`[FaceWorker:MediaPipe] Running inference on ${width}x${height} (scaleX=${scaleX.toFixed(2)}, scaleY=${scaleY.toFixed(2)})...`);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const predictions: any[] = await faceModel.estimateFaces(tensor);
-  tensor.dispose();
+  let predictions: any[];
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    predictions = await faceModel.estimateFaces(tensor);
+  } finally {
+    // Always dispose — even if estimateFaces() throws — to avoid tensor memory leaks.
+    tensor.dispose();
+  }
 
   if (!predictions || predictions.length === 0) {
     console.log("[FaceWorker:MediaPipe] 0 faces detected.");
@@ -168,8 +186,14 @@ async function detectPersons(imageBuffer: Buffer, preWidth?: number, preHeight?:
   console.log(`[FaceWorker:COCO-SSD] Running inference on ${width}x${height}...`);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const predictions: any[] = await personModel.detect(tensor);
-  tensor.dispose();
+  let predictions: any[];
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    predictions = await personModel.detect(tensor);
+  } finally {
+    // Always dispose — even if detect() throws — to avoid tensor memory leaks.
+    tensor.dispose();
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const persons = predictions.filter((p: any) => PERSON_CLASSES.has(p.class) && p.score >= 0.4);

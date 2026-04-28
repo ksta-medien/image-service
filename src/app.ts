@@ -3,6 +3,8 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { Storage } from "@google-cloud/storage";
 import sharp from "sharp";
+import { lookup as dnsLookup } from "dns";
+import { promisify } from "util";
 import { ImageProcessor } from "./image-processor";
 import { FaceDetector } from "./face-detector";
 import { imageCache, buildCacheKey } from "./image-cache";
@@ -16,6 +18,8 @@ import {
 } from "./fallback-svg";
 import type { ImageProcessingParams } from "./types";
 import type { Context } from "hono";
+
+const dnsLookupAsync = promisify(dnsLookup);
 
 const app = new Hono();
 
@@ -100,6 +104,68 @@ function buildImageUrl(pathOrUrl: string): string {
   return `${GCS_BUCKET_BASE_URL}/${cleanPath}`;
 }
 
+// Timeout for outbound HTTP fetches in the /image route (ms).
+// Configurable via EXTERNAL_FETCH_TIMEOUT_MS env var.
+const EXTERNAL_FETCH_TIMEOUT_MS = parseInt(
+  process.env.EXTERNAL_FETCH_TIMEOUT_MS ?? "5000",
+  10,
+);
+
+/**
+ * Private IP range detector — returns true for addresses that must not be
+ * reached by an operator-controlled URL parameter (SSRF mitigation).
+ */
+function isPrivateOrLoopbackIp(ip: string): boolean {
+  // IPv4 private / loopback / link-local / CGNAT ranges
+  const ipv4Private =
+    /^(127\.|10\.|192\.168\.|169\.254\.|0\.|100\.(6[4-9]|[7-9]\d|1([01]\d|2[0-7]))\.)/.test(ip);
+  // IPv6 loopback (::1) and link-local (fe80::/10)
+  const ipv6Private = ip === "::1" || /^fe[89ab][0-9a-f]:/i.test(ip);
+  return ipv4Private || ipv6Private;
+}
+
+/**
+ * Validate that a URL is safe to fetch:
+ *  1. Scheme must be http or https.
+ *  2. Hostname must not be localhost / 0.0.0.0 or resolve to a private/
+ *     loopback IP address (SSRF protection).
+ *
+ * Throws a descriptive Error if validation fails.
+ */
+async function validateExternalUrl(rawUrl: string): Promise<URL> {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`Invalid URL: ${rawUrl}`);
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`Disallowed URL scheme: ${parsed.protocol}`);
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+
+  // Reject bare loopback / wildcard hostnames before DNS
+  if (hostname === "localhost" || hostname === "0.0.0.0") {
+    throw new Error(`Disallowed hostname: ${hostname}`);
+  }
+
+  // Resolve hostname and reject private / loopback IPs
+  try {
+    const { address } = await dnsLookupAsync(hostname);
+    if (isPrivateOrLoopbackIp(address)) {
+      throw new Error(`Disallowed target IP for hostname ${hostname}: ${address}`);
+    }
+  } catch (err) {
+    // Re-throw our own validation errors unchanged; treat DNS failures as blocked
+    if (err instanceof Error && err.message.startsWith("Disallowed")) throw err;
+    throw new Error(`DNS resolution failed for ${hostname}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  return parsed;
+}
+
 /**
  * Parse image processing query params from a Hono context.
  */
@@ -140,8 +206,16 @@ async function handleImageRequest(
   params: ImageProcessingParams,
   c: Context,
 ): Promise<Response> {
-  // Immediate fallback trigger
-  if (imagePath.includes("fallbackImage")) {
+  // Immediate fallback trigger — match only when the last path segment
+  // (before any file extension) is exactly "fallbackImage", e.g.
+  // "fallbackImage.jpg" or "some/path/fallbackImage.png".
+  // Using .includes() would also match unintended paths like
+  // "real/fallbackImagery.jpg".
+  const lastSegment = imagePath.split("/").pop() ?? "";
+  const segmentBase = lastSegment.includes(".")
+    ? lastSegment.slice(0, lastSegment.lastIndexOf("."))
+    : lastSegment;
+  if (segmentBase === "fallbackImage") {
     c.header("Content-Type", FALLBACK_CONTENT_TYPE);
     c.header("Cache-Control", "public, max-age=300");
     return c.body(FALLBACK_SVG_BUFFER as unknown as string);
@@ -272,7 +346,28 @@ app.get("/image", async (c) => {
 
   const fetchSource = async (): Promise<Buffer> => {
     if (sourceUrl.startsWith("http://") || sourceUrl.startsWith("https://")) {
-      const response = await fetch(sourceUrl);
+      // Validate scheme + SSRF before issuing any network request.
+      await validateExternalUrl(sourceUrl);
+
+      const controller = new AbortController();
+      const timeoutHandle = setTimeout(
+        () => controller.abort(),
+        EXTERNAL_FETCH_TIMEOUT_MS,
+      );
+      let response: globalThis.Response;
+      try {
+        response = await fetch(sourceUrl, { signal: controller.signal });
+      } catch (err) {
+        if ((err as Error).name === "AbortError") {
+          throw new Error(
+            `External fetch timed out after ${EXTERNAL_FETCH_TIMEOUT_MS} ms: ${sourceUrl}`,
+          );
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
+
       if (!response.ok) {
         throw new Error(`Failed to fetch image: ${response.statusText}`);
       }
