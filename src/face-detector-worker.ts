@@ -165,30 +165,26 @@ async function detectFacesFromTensor(input: TensorInput): Promise<FaceBox[]> {
   }
 
   console.log(`[FaceWorker:MediaPipe] ${predictions.length} face(s) detected.`);
+  // Image canvas bounds in original-image coordinates (after scale-back).
+  const maxX = Math.round(width * scaleX);
+  const maxY = Math.round(height * scaleY);
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return predictions.map((p: any): FaceBox => {
     const box = p.box ?? p.boundingBox ?? p;
-    // Resolve top-left corner (raw, unscaled) — used both for the final topLeft
-    // coordinate and as the subtrahend when deriving w/h from bottomRight.
+    // Resolve raw (unscaled) corners, then scale and clamp both to image bounds.
     const rawXMin = box.xMin ?? box.topLeft?.[0] ?? 0;
     const rawYMin = box.yMin ?? box.topLeft?.[1] ?? 0;
-    const xMin = Math.max(0, Math.round(rawXMin * scaleX));
-    const yMin = Math.max(0, Math.round(rawYMin * scaleY));
-    const w = Math.round(
-      (box.width !== undefined
-        ? box.width
-        : box.bottomRight?.[0] !== undefined
-          ? box.bottomRight[0] - rawXMin
-          : 0) * scaleX,
-    );
-    const h = Math.round(
-      (box.height !== undefined
-        ? box.height
-        : box.bottomRight?.[1] !== undefined
-          ? box.bottomRight[1] - rawYMin
-          : 0) * scaleY,
-    );
-    return { topLeft: [xMin, yMin], bottomRight: [xMin + w, yMin + h] };
+    const rawXMax =
+      box.xMax ?? box.bottomRight?.[0] ?? rawXMin + (box.width ?? 0);
+    const rawYMax =
+      box.yMax ?? box.bottomRight?.[1] ?? rawYMin + (box.height ?? 0);
+    const xMin = Math.max(0, Math.min(maxX, Math.round(rawXMin * scaleX)));
+    const yMin = Math.max(0, Math.min(maxY, Math.round(rawYMin * scaleY)));
+    // Ensure bottomRight >= topLeft so the box is never inverted.
+    const xMax = Math.max(xMin, Math.min(maxX, Math.round(rawXMax * scaleX)));
+    const yMax = Math.max(yMin, Math.min(maxY, Math.round(rawYMax * scaleY)));
+    return { topLeft: [xMin, yMin], bottomRight: [xMax, yMax] };
   });
 }
 
@@ -212,19 +208,21 @@ async function detectPersonsFromTensor(input: TensorInput): Promise<FaceBox[]> {
   if (persons.length === 0) return [];
 
   console.log(`[FaceWorker:COCO-SSD] ${persons.length} person(s) above threshold.`);
+  const maxX = Math.round(width * scaleX);
+  const maxY = Math.round(height * scaleY);
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return persons.map((p: any): FaceBox => {
     const [x, y, w, h] = (p.bbox as [number, number, number, number]).map(
       (v, idx) => v * (idx % 2 === 0 ? scaleX : scaleY),
     );
     const headH = Math.round(h * 0.4);
-    return {
-      topLeft: [Math.max(0, Math.round(x)), Math.max(0, Math.round(y))],
-      bottomRight: [
-        Math.min(Math.round(x + w), Math.round(width * scaleX)),
-        Math.min(Math.round(y + headH), Math.round(height * scaleY)),
-      ],
-    };
+    const left   = Math.max(0, Math.min(maxX, Math.round(x)));
+    const top    = Math.max(0, Math.min(maxY, Math.round(y)));
+    // Clamp right/bottom and guarantee bottomRight >= topLeft.
+    const right  = Math.max(left,  Math.min(maxX, Math.round(x + w)));
+    const bottom = Math.max(top,   Math.min(maxY, Math.round(y + headH)));
+    return { topLeft: [left, top], bottomRight: [right, bottom] };
   });
 }
 

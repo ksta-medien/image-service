@@ -259,29 +259,41 @@ export class FaceDetector {
     imageBuffer: Buffer,
     preReadMeta?: { width?: number; height?: number },
   ): Promise<FaceBox[]> {
-    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    // Use an AbortController so the timeout can cancel the in-flight worker
+    // request, remove its pendingRequests entry, and release the semaphore slot
+    // — preventing a deadlock when the worker hangs or is slow to respond.
+    const controller = new AbortController();
+    const { signal } = controller;
 
-    const timeoutPromise = new Promise<FaceBox[]>((resolve) => {
-      timeoutHandle = setTimeout(() => {
-        console.warn(
-          `[FaceDetector] Detection timed out after ${FACE_DETECTION_TIMEOUT_MS} ms — falling back to entropy.`,
-        );
-        resolve([]);
-      }, FACE_DETECTION_TIMEOUT_MS);
-    });
+    const timeoutHandle = setTimeout(() => {
+      console.warn(
+        `[FaceDetector] Detection timed out after ${FACE_DETECTION_TIMEOUT_MS} ms — falling back to entropy.`,
+      );
+      controller.abort();
+    }, FACE_DETECTION_TIMEOUT_MS);
 
-    const detectionPromise = FaceDetector._detect(imageBuffer, preReadMeta).finally(() => {
+    try {
+      return await FaceDetector._detect(imageBuffer, preReadMeta, signal);
+    } catch (err) {
+      if ((err as Error).name === "AbortError") {
+        return [];
+      }
+      throw err;
+    } finally {
       clearTimeout(timeoutHandle);
-    });
-
-    return Promise.race([detectionPromise, timeoutPromise]);
+    }
   }
 
   private static async _detect(
     imageBuffer: Buffer,
     preReadMeta?: { width?: number; height?: number },
+    signal?: AbortSignal,
   ): Promise<FaceBox[]> {
     await acquireInference();
+    // Track whether the semaphore slot was already released by the abort handler
+    // so the finally block doesn't double-release it.
+    let inferenceReleased = false;
+
     try {
       console.log(`[FaceDetector] detect() — buffer: ${imageBuffer.length} bytes`);
 
@@ -300,15 +312,38 @@ export class FaceDetector {
       };
 
       return await new Promise<FaceBox[]>((resolve, reject) => {
+        // If the caller already aborted before we even queued, bail immediately.
+        if (signal?.aborted) {
+          const err = new Error("Face detection aborted");
+          err.name = "AbortError";
+          reject(err);
+          return;
+        }
+
         pendingRequests.set(id, { resolve, reject });
-        // Transfer the ArrayBuffer to avoid copying (zero-copy)
+
+        // When the timeout fires, reject this promise, clean up the pending
+        // entry, and release the semaphore so future requests are not blocked.
+        const onAbort = () => {
+          if (pendingRequests.delete(id)) {
+            inferenceReleased = true;
+            releaseInference();
+            const err = new Error("Face detection aborted");
+            err.name = "AbortError";
+            reject(err);
+          }
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+
+        // Transfer the ArrayBuffer to avoid copying (zero-copy).
         worker.postMessage(req, [req.buffer]);
       });
     } catch (err) {
+      if ((err as Error).name === "AbortError") throw err;
       console.error("[FaceDetector] Detection error, falling back:", err);
       return [];
     } finally {
-      releaseInference();
+      if (!inferenceReleased) releaseInference();
     }
   }
 }

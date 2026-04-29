@@ -175,14 +175,24 @@ async function validateExternalUrl(rawUrl: string): Promise<URL> {
 }
 
 /**
+ * Parse an optional integer query param.
+ * Returns `undefined` if the value is absent, and `NaN` if it is present but
+ * not a valid integer — so callers can detect and reject bad input explicitly.
+ */
+function parseOptionalInt(value: string | undefined): number | undefined {
+  if (value === undefined || value === "") return undefined;
+  return Number.parseInt(value, 10);
+}
+
+/**
  * Parse image processing query params from a Hono context.
  */
 function parseParams(c: Context): ImageProcessingParams {
   return {
-    w: c.req.query("w") ? parseInt(c.req.query("w")!, 10) || undefined : undefined,
-    h: c.req.query("h") ? parseInt(c.req.query("h")!, 10) || undefined : undefined,
+    w: parseOptionalInt(c.req.query("w")) || undefined,
+    h: parseOptionalInt(c.req.query("h")) || undefined,
     fm: c.req.query("fm") as ImageProcessingParams["fm"],
-    q: c.req.query("q") ? parseInt(c.req.query("q")!, 10) : undefined,
+    q: parseOptionalInt(c.req.query("q")),
     fit: c.req.query("fit") as ImageProcessingParams["fit"],
     ar: c.req.query("ar"),
     rect: c.req.query("rect"),
@@ -229,8 +239,8 @@ async function handleImageRequest(
     return c.body(FALLBACK_SVG_BUFFER as unknown as string);
   }
 
-  // Validate quality parameter
-  if (params.q !== undefined && (params.q < 1 || params.q > 100)) {
+  // Validate quality parameter — also rejects NaN (parseInt("abc") → NaN)
+  if (params.q !== undefined && (!Number.isFinite(params.q) || params.q < 1 || params.q > 100)) {
     return c.json({ error: "Quality must be between 1 and 100" }, 400);
   }
 
