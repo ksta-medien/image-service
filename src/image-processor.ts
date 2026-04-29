@@ -63,16 +63,18 @@ export class ImageProcessor {
   }
 
   /**
-   * Calculate dimensions based on aspect ratio
+   * Calculate dimensions based on aspect ratio.
+   * Accepts pre-read metadata to avoid a redundant sharp.metadata() call.
    */
   private async calculateAspectRatioDimensions(
     ar: ParsedAspectRatio,
     targetWidth?: number,
     targetHeight?: number,
+    preReadMeta?: { width?: number; height?: number },
   ): Promise<{ width: number; height: number }> {
-    const metadata = await this.sharp.metadata();
-    const originalWidth = metadata.width || 1;
-    const originalHeight = metadata.height || 1;
+    const meta = preReadMeta ?? (await this.sharp.metadata());
+    const originalWidth = meta.width || 1;
+    const originalHeight = meta.height || 1;
     const aspectRatio = ar.width / ar.height;
 
     if (targetWidth && targetHeight) {
@@ -191,12 +193,14 @@ export class ImageProcessor {
         const ar = this.parseAspectRatio(params.ar);
         if (ar) {
           // If aspect ratio is specified, it takes precedence
-          // Calculate height from width and aspect ratio, or vice versa
+          // Calculate height from width and aspect ratio, or vice versa.
+          // Pass pre-read metadata to avoid a redundant sharp.metadata() call.
           if (params.w) {
             const dimensions = await this.calculateAspectRatioDimensions(
               ar,
               params.w,
               undefined,
+              metadata,
             );
             finalWidth = dimensions.width;
             finalHeight = dimensions.height;
@@ -205,14 +209,25 @@ export class ImageProcessor {
               ar,
               undefined,
               params.h,
+              metadata,
             );
             finalWidth = dimensions.width;
             finalHeight = dimensions.height;
           } else {
+            // No target w or h — derive output size from the source dimensions
+            // and the requested aspect ratio.
+            // If a rect crop was applied in Step 1, use the cropped region's
+            // dimensions (already stored in this.appliedRect) rather than the
+            // original image metadata, otherwise the output size would be
+            // based on the full pre-crop image and produce wrong proportions.
+            const sourceMeta = this.appliedRect
+              ? { width: this.appliedRect.width, height: this.appliedRect.height }
+              : metadata;
             const dimensions = await this.calculateAspectRatioDimensions(
               ar,
               undefined,
               undefined,
+              sourceMeta,
             );
             finalWidth = dimensions.width;
             finalHeight = dimensions.height;
@@ -250,7 +265,9 @@ export class ImageProcessor {
           const offsetY    = this.appliedRect ? this.appliedRect.top    : 0;
 
           try {
-            const faces = await FaceDetector.detect(this.originalBuffer);
+            // Pass pre-read metadata so bufferToRgbTensor skips a redundant
+            // sharp.metadata() call on the original buffer.
+            const faces = await FaceDetector.detect(this.originalBuffer, metadata);
             const center = computeFaceCenter(
               faces,
               metadata.width ?? 0,
