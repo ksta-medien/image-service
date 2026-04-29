@@ -159,20 +159,24 @@ async function detectFaces(imageBuffer: Buffer, preWidth?: number, preHeight?: n
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return predictions.map((p: any): FaceBox => {
     const box = p.box ?? p.boundingBox ?? p;
-    const xMin = Math.max(0, Math.round((box.xMin ?? box.topLeft?.[0] ?? 0) * scaleX));
-    const yMin = Math.max(0, Math.round((box.yMin ?? box.topLeft?.[1] ?? 0) * scaleY));
+    // Resolve top-left corner (raw, unscaled) — used both for the final topLeft
+    // coordinate and as the subtrahend when deriving w/h from bottomRight.
+    const rawXMin = box.xMin ?? box.topLeft?.[0] ?? 0;
+    const rawYMin = box.yMin ?? box.topLeft?.[1] ?? 0;
+    const xMin = Math.max(0, Math.round(rawXMin * scaleX));
+    const yMin = Math.max(0, Math.round(rawYMin * scaleY));
     const w = Math.round(
       (box.width !== undefined
         ? box.width
         : box.bottomRight?.[0] !== undefined
-          ? box.bottomRight[0] - (box.xMin ?? 0)
+          ? box.bottomRight[0] - rawXMin
           : 0) * scaleX,
     );
     const h = Math.round(
       (box.height !== undefined
         ? box.height
         : box.bottomRight?.[1] !== undefined
-          ? box.bottomRight[1] - (box.yMin ?? 0)
+          ? box.bottomRight[1] - rawYMin
           : 0) * scaleY,
     );
     return { topLeft: [xMin, yMin], bottomRight: [xMin + w, yMin + h] };

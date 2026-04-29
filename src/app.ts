@@ -119,9 +119,14 @@ function isPrivateOrLoopbackIp(ip: string): boolean {
   // IPv4 private / loopback / link-local / CGNAT ranges
   const ipv4Private =
     /^(127\.|10\.|192\.168\.|169\.254\.|0\.|100\.(6[4-9]|[7-9]\d|1([01]\d|2[0-7]))\.)/.test(ip);
-  // IPv6 loopback (::1) and link-local (fe80::/10)
-  const ipv6Private = ip === "::1" || /^fe[89ab][0-9a-f]:/i.test(ip);
-  return ipv4Private || ipv6Private;
+  // RFC1918 172.16.0.0/12 (172.16.x.x – 172.31.x.x)
+  const ipv4Rfc1918_172 = /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
+  // IPv6 loopback (::1), link-local (fe80::/10), and ULA (fc00::/7: fc** and fd**)
+  const ipv6Private =
+    ip === "::1" ||
+    /^fe[89ab][0-9a-f]:/i.test(ip) ||
+    /^f[cd][0-9a-f]{2}:/i.test(ip);
+  return ipv4Private || ipv4Rfc1918_172 || ipv6Private;
 }
 
 /**
@@ -278,6 +283,7 @@ async function handleImageRequest(
       const { buffer, contentType } = await renderFallback(width, height, params.fm);
       c.header("Content-Type", contentType);
       c.header("Cache-Control", "public, max-age=300");
+      c.status(404);
       return c.body(buffer as unknown as string);
     }
 
@@ -369,6 +375,9 @@ app.get("/image", async (c) => {
       }
 
       if (!response.ok) {
+        if (response.status === 404) {
+          throw new NotFoundError(sourceUrl);
+        }
         throw new Error(`Failed to fetch image: ${response.statusText}`);
       }
       return Buffer.from(await response.arrayBuffer());
