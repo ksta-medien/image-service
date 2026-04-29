@@ -156,11 +156,14 @@ async function validateExternalUrl(rawUrl: string): Promise<URL> {
     throw new Error(`Disallowed hostname: ${hostname}`);
   }
 
-  // Resolve hostname and reject private / loopback IPs
+  // Resolve all addresses for the hostname and reject if any resolves to a
+  // private/loopback IP (DNS rebinding / multi-A-record SSRF mitigation).
   try {
-    const { address } = await dnsLookupAsync(hostname);
-    if (isPrivateOrLoopbackIp(address)) {
-      throw new Error(`Disallowed target IP for hostname ${hostname}: ${address}`);
+    const records = await dnsLookupAsync(hostname, { all: true, verbatim: true });
+    for (const { address } of records) {
+      if (isPrivateOrLoopbackIp(address)) {
+        throw new Error(`Disallowed target IP for hostname ${hostname}: ${address}`);
+      }
     }
   } catch (err) {
     // Re-throw our own validation errors unchanged; treat DNS failures as blocked
@@ -372,6 +375,12 @@ app.get("/image", async (c) => {
         throw err;
       } finally {
         clearTimeout(timeoutHandle);
+      }
+
+      // Re-validate the final URL after redirects to prevent SSRF via open
+      // redirects (e.g. example.com → 302 → 169.254.169.254).
+      if (response.url && response.url !== sourceUrl) {
+        await validateExternalUrl(response.url);
       }
 
       if (!response.ok) {

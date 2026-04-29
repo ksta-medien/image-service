@@ -136,19 +136,28 @@ async function bufferToRgbTensor(
 // Detection stages
 // ---------------------------------------------------------------------------
 
-async function detectFaces(imageBuffer: Buffer, preWidth?: number, preHeight?: number): Promise<FaceBox[]> {
-  const { tensor, width, height, scaleX, scaleY } = await bufferToRgbTensor(imageBuffer, preWidth, preHeight);
+// Return type for the shared tensor input used by both detection stages.
+interface TensorInput {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tensor: any;
+  width: number;
+  height: number;
+  scaleX: number;
+  scaleY: number;
+}
+
+/**
+ * Run MediaPipe face detection on a pre-built tensor.
+ * The caller is responsible for disposing the tensor.
+ */
+async function detectFacesFromTensor(input: TensorInput): Promise<FaceBox[]> {
+  const { tensor, width, height, scaleX, scaleY } = input;
   console.log(`[FaceWorker:MediaPipe] Running inference on ${width}x${height} (scaleX=${scaleX.toFixed(2)}, scaleY=${scaleY.toFixed(2)})...`);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let predictions: any[];
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    predictions = await faceModel.estimateFaces(tensor);
-  } finally {
-    // Always dispose — even if estimateFaces() throws — to avoid tensor memory leaks.
-    tensor.dispose();
-  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  predictions = await faceModel.estimateFaces(tensor);
 
   if (!predictions || predictions.length === 0) {
     console.log("[FaceWorker:MediaPipe] 0 faces detected.");
@@ -185,19 +194,18 @@ async function detectFaces(imageBuffer: Buffer, preWidth?: number, preHeight?: n
 
 const PERSON_CLASSES = new Set(["person"]);
 
-async function detectPersons(imageBuffer: Buffer, preWidth?: number, preHeight?: number): Promise<FaceBox[]> {
-  const { tensor, width, height, scaleX, scaleY } = await bufferToRgbTensor(imageBuffer, preWidth, preHeight);
+/**
+ * Run COCO-SSD person detection on a pre-built tensor.
+ * The caller is responsible for disposing the tensor.
+ */
+async function detectPersonsFromTensor(input: TensorInput): Promise<FaceBox[]> {
+  const { tensor, width, height, scaleX, scaleY } = input;
   console.log(`[FaceWorker:COCO-SSD] Running inference on ${width}x${height}...`);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let predictions: any[];
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    predictions = await personModel.detect(tensor);
-  } finally {
-    // Always dispose — even if detect() throws — to avoid tensor memory leaks.
-    tensor.dispose();
-  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  predictions = await personModel.detect(tensor);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const persons = predictions.filter((p: any) => PERSON_CLASSES.has(p.class) && p.score >= 0.4);
@@ -228,25 +236,34 @@ async function handleRequest(req: WorkerRequest): Promise<FaceBox[]> {
   await loadModels();
   const imageBuffer = Buffer.from(req.buffer);
 
-  const faces = await detectFaces(imageBuffer, req.width, req.height);
-  if (faces.length > 0) {
-    const cx = Math.round(faces.reduce((s, f) => s + (f.topLeft[0] + f.bottomRight[0]) / 2, 0) / faces.length);
-    const cy = Math.round(faces.reduce((s, f) => s + (f.topLeft[1] + f.bottomRight[1]) / 2, 0) / faces.length);
-    console.log(`[FaceWorker] MediaPipe | Boxes: ${faces.length} | Focal: (${cx}, ${cy})`);
-    return faces;
-  }
+  // Decode and resize the image exactly once; reuse the tensor for both
+  // MediaPipe and COCO-SSD so the fallback path avoids a second Sharp decode.
+  const input = await bufferToRgbTensor(imageBuffer, req.width, req.height);
+  try {
+    const faces = await detectFacesFromTensor(input);
+    if (faces.length > 0) {
+      const cx = Math.round(faces.reduce((s, f) => s + (f.topLeft[0] + f.bottomRight[0]) / 2, 0) / faces.length);
+      const cy = Math.round(faces.reduce((s, f) => s + (f.topLeft[1] + f.bottomRight[1]) / 2, 0) / faces.length);
+      console.log(`[FaceWorker] MediaPipe | Boxes: ${faces.length} | Focal: (${cx}, ${cy})`);
+      return faces;
+    }
 
-  console.log("[FaceWorker] No faces → COCO-SSD fallback...");
-  const persons = await detectPersons(imageBuffer, req.width, req.height);
-  if (persons.length > 0) {
-    const cx = Math.round(persons.reduce((s, f) => s + (f.topLeft[0] + f.bottomRight[0]) / 2, 0) / persons.length);
-    const cy = Math.round(persons.reduce((s, f) => s + (f.topLeft[1] + f.bottomRight[1]) / 2, 0) / persons.length);
-    console.log(`[FaceWorker] COCO-SSD | Boxes: ${persons.length} | Focal: (${cx}, ${cy})`);
-    return persons;
-  }
+    console.log("[FaceWorker] No faces → COCO-SSD fallback...");
+    const persons = await detectPersonsFromTensor(input);
+    if (persons.length > 0) {
+      const cx = Math.round(persons.reduce((s, f) => s + (f.topLeft[0] + f.bottomRight[0]) / 2, 0) / persons.length);
+      const cy = Math.round(persons.reduce((s, f) => s + (f.topLeft[1] + f.bottomRight[1]) / 2, 0) / persons.length);
+      console.log(`[FaceWorker] COCO-SSD | Boxes: ${persons.length} | Focal: (${cx}, ${cy})`);
+      return persons;
+    }
 
-  console.log("[FaceWorker] No faces or persons detected.");
-  return [];
+    console.log("[FaceWorker] No faces or persons detected.");
+    return [];
+  } finally {
+    // Dispose the shared tensor once — regardless of which path was taken or
+    // whether an error was thrown — to prevent TF.js memory leaks.
+    input.tensor.dispose();
+  }
 }
 
 // Bun Worker API: self.onmessage
