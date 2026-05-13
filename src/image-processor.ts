@@ -333,20 +333,17 @@ export class ImageProcessor {
       }
 
       // Step 4: Convert format if specified
-      const format = params.fm || "jpg";
+      // Note: 'avif' requests are transparently remapped to 'webp' —
+      // AVIF encoding via libaom is 5–10× slower than WebP and caused
+      // Cloud Run 503 timeouts under load. WebP provides comparable
+      // compression with far lower encode latency.
+      // Explicitly typed as string so the 'avif' guard is never narrowed away
+      // by the compiler when clients still pass fm=avif at runtime.
+      const rawFormat: string = params.fm ?? "jpg";
+      const format: string = rawFormat === "avif" ? "webp" : rawFormat;
       const quality = params.q || 80;
 
       switch (format.toLowerCase()) {
-        case "avif":
-          // Default libaom speed is 4, which takes 8-12 s on a 2000 px image
-          // and causes Cloud Run 503s under load. Speed 6 cuts encode time to
-          // ~1-2 s with a negligible file-size increase (~5 %).
-          // Configurable via AVIF_SPEED env var (0 = best compression, 9 = fastest).
-          this.sharp = this.sharp.avif({
-            quality,
-            speed: parseInt(process.env.AVIF_SPEED ?? "6", 10),
-          });
-          break;
         case "webp":
           this.sharp = this.sharp.webp({ quality });
           break;
@@ -380,12 +377,12 @@ export class ImageProcessor {
   }
 
   /**
-   * Get the MIME type for a given format
+   * Get the MIME type for a given format.
+   * 'avif' is transparently remapped to 'webp'.
    */
   static getMimeType(format: string = "jpg"): string {
     switch (format.toLowerCase()) {
       case "avif":
-        return "image/avif";
       case "webp":
         return "image/webp";
       case "png":

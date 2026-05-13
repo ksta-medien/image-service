@@ -1,4 +1,4 @@
-export type ImageFormat = 'avif' | 'jpg' | 'jpeg' | 'webp' | 'png';
+export type ImageFormat = 'jpg' | 'jpeg' | 'webp' | 'png';
 export type FitMode = 'crop' | 'cover' | 'fill' | 'scale';
 export type CropGravity = 'faces' | 'entropy' | 'faces,entropy' | 'entropy,faces';
 

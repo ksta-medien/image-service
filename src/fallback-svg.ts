@@ -78,7 +78,7 @@ export function resolveFallbackDimensions(
  *
  * @param width   Target pixel width
  * @param height  Target pixel height
- * @param format  Image format: 'jpg'|'jpeg'|'webp'|'png'|'avif' (default: 'jpg')
+ * @param format  Image format: 'jpg'|'jpeg'|'webp'|'png' (default: 'jpg')
  * @returns       { buffer, contentType }
  */
 export async function renderFallback(
@@ -106,11 +106,10 @@ export async function renderFallback(
     let buffer: Buffer;
     let contentType: string;
 
-    switch (fmt) {
-      case "avif":
-        buffer = await pipeline.avif({ quality }).toBuffer();
-        contentType = "image/avif";
-        break;
+    // Transparently remap avif → webp (see image-processor.ts for rationale)
+    const normalizedFmt: string = fmt === "avif" ? "webp" : fmt;
+
+    switch (normalizedFmt) {
       case "webp":
         buffer = await pipeline.webp({ quality }).toBuffer();
         contentType = "image/webp";

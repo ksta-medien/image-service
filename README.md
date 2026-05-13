@@ -5,7 +5,7 @@ A high-performance image processing service built with Bun, TypeScript, and Shar
 ## Features
 
 - Fast image processing with Sharp
-- Support for modern formats (AVIF, WebP, JPEG, PNG)
+- Support for modern formats (WebP, JPEG, PNG)
 - Smart cropping with face detection and entropy analysis
 - Aspect ratio handling
 - Source rectangle extraction
@@ -24,7 +24,7 @@ The service supports the following 9 query parameters:
 | `url` | Source image URL (required) | `https://example.com/image.jpg` |
 | `w` | Output width in pixels | `800`, `1920` |
 | `h` | Output height in pixels | `600`, `1080` |
-| `fm` | Output format | `avif`, `webp`, `jpg`, `png` |
+| `fm` | Output format | `webp`, `jpg`, `png` |
 | `q` | Quality (1-100) | `80`, `90`, `100` |
 | `fit` | Fit mode | `crop`, `cover`, `fill`, `scale` |
 | `ar` | Aspect ratio | `16:9`, `1:1`, `2:1` |
@@ -49,7 +49,7 @@ The service supports the following 9 query parameters:
 The service automatically resolves paths to your configured Google Cloud Storage bucket:
 
 ```
-GET /2026/03/25/bf2407b1-1998-4fdb-9243-c92d05069698.jpeg?q=75&rect=0,46,4000,2250&w=2000&h=1126&fm=avif
+GET /2026/03/25/bf2407b1-1998-4fdb-9243-c92d05069698.jpeg?q=75&rect=0,46,4000,2250&w=2000&h=1126&fm=webp
 ```
 
 This will fetch from:
@@ -119,7 +119,7 @@ Then use paths directly in your components:
     src="/2026/03/25/bf2407b1-1998-4fdb-9243-c92d05069698.jpeg"
     width="2000"
     height="1126"
-    format="avif"
+    format="webp"
     quality="75"
     fit="cover"
   />
@@ -233,7 +233,7 @@ Environment variables:
 
 **Path-based image processing (recommended)**. Automatically resolves paths to the configured GCS bucket.
 
-**Example**: `GET /2026/03/25/image.jpeg?w=800&fm=avif&q=75`
+**Example**: `GET /2026/03/25/image.jpeg?w=800&fm=webp&q=75`
 
 **Query Parameters**: All 9 processing parameters (w, h, fm, q, fit, ar, rect, crop)
 
