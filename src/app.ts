@@ -40,12 +40,10 @@ const GCS_BUCKET_BASE_URL =
 // Sharp libvips Thread-Pool konfigurieren.
 // SHARP_CONCURRENCY sollte gleich containerConcurrency gesetzt werden (z.B. 4),
 // damit jeder parallele Request einen eigenen libvips-Thread bekommt und
-// CPU-intensive Operationen (insbesondere AVIF-Encoding) echt parallel auf
-// mehreren vCPUs laufen. Bei SHARP_CONCURRENCY=1 (Default) wuerden alle
-// parallelen Requests sich einen einzigen Thread teilen → Serialisierung →
-// AVIF-Encodes stauen sich auf → Timeout → 503.
-// AVIF-Encoding-Geschwindigkeit wird zusaetzlich durch AVIF_SPEED gesteuert
-// (image-processor.ts, default 6).
+// CPU-intensive Operationen echt parallel auf mehreren vCPUs laufen.
+// Bei SHARP_CONCURRENCY=1 (Default) wuerden alle parallelen Requests sich
+// einen einzigen Thread teilen → Serialisierung → Encodes stauen sich auf
+// → Timeout → 503.
 const sharpConcurrency = parseInt(process.env.SHARP_CONCURRENCY ?? "1", 10);
 sharp.concurrency(sharpConcurrency);
 console.log(`[startup] sharp.concurrency set to ${sharpConcurrency}`);
@@ -343,7 +341,7 @@ app.get("/fallbackImage", async (c) => {
 });
 
 // Primary image processing endpoint — path resolves directly to GCS
-app.get("/:path{.+\\.(jpg|jpeg|png|webp|avif)}", async (c) => {
+app.get("/:path{.+\\.(jpg|jpeg|png|webp)}", async (c) => {
   const imagePath = c.req.param("path");
   const params = parseParams(c);
   return handleImageRequest(
