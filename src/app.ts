@@ -21,6 +21,78 @@ import type { Context } from "hono";
 
 const dnsLookupAsync = promisify(dnsLookup);
 
+// ---------------------------------------------------------------------------
+// SSRF guard — regex constants (compiled once at module load)
+// ---------------------------------------------------------------------------
+
+/** IPv4 private / loopback / link-local / CGNAT ranges */
+const IPV4_PRIVATE_RE =
+  /^(127\.|10\.|192\.168\.|169\.254\.|0\.|100\.(6[4-9]|[7-9]\d|1([01]\d|2[0-7]))\.)/;
+/** RFC1918 172.16.0.0/12 (172.16.x.x – 172.31.x.x) */
+const IPV4_RFC1918_172_RE = /^172\.(1[6-9]|2\d|3[01])\./;
+/** IPv6 link-local (fe80::/10) — matches fe80–fe8f, fe90–fe9f, fea0–feaf, feb0–febf */
+const IPV6_LINK_LOCAL_RE = /^fe[89ab][0-9a-f]:/i;
+/** IPv6 ULA (fc00::/7) — fc** and fd** */
+const IPV6_ULA_RE = /^f[cd][0-9a-f]{2}:/i;
+
+// ---------------------------------------------------------------------------
+// DNS cache — prevents a fresh syscall for every external-URL request
+// ---------------------------------------------------------------------------
+
+const DNS_CACHE_TTL_MS = parseInt(process.env.DNS_CACHE_TTL_MS ?? "60000", 10);
+const DNS_CACHE_MAX_ENTRIES = parseInt(
+  process.env.DNS_CACHE_MAX_ENTRIES ?? "1000",
+  10,
+);
+
+interface DnsCacheEntry {
+  addresses: string[];
+  expiresAt: number;
+}
+
+const dnsCache = new Map<string, DnsCacheEntry>();
+
+/** Remove all entries whose TTL has elapsed. Called before inserting when the
+ *  cache is full to avoid unbounded growth without a full LRU structure. */
+function evictExpiredDnsEntries(): void {
+  const now = Date.now();
+  for (const [key, entry] of dnsCache) {
+    if (entry.expiresAt <= now) dnsCache.delete(key);
+  }
+}
+
+/**
+ * Resolve `hostname` to its IP addresses, served from an in-process TTL cache.
+ *
+ * Only successful resolutions are cached — DNS failures are never stored so a
+ * transient NXDOMAIN does not permanently block a legitimate hostname.
+ *
+ * The cache is intentionally bounded (`DNS_CACHE_MAX_ENTRIES`) to prevent
+ * memory exhaustion from an attacker cycling through many hostnames.
+ */
+async function resolveHostname(hostname: string): Promise<string[]> {
+  const now = Date.now();
+
+  const cached = dnsCache.get(hostname);
+  if (cached && cached.expiresAt > now) {
+    return cached.addresses;
+  }
+
+  // Cache miss or stale — perform real DNS lookup
+  const records = await dnsLookupAsync(hostname, { all: true, verbatim: true });
+  const addresses = records.map((r) => r.address);
+
+  // Evict expired entries when the cache is full; skip caching if still full.
+  if (dnsCache.size >= DNS_CACHE_MAX_ENTRIES) {
+    evictExpiredDnsEntries();
+  }
+  if (dnsCache.size < DNS_CACHE_MAX_ENTRIES) {
+    dnsCache.set(hostname, { addresses, expiresAt: now + DNS_CACHE_TTL_MS });
+  }
+
+  return addresses;
+}
+
 const app = new Hono();
 
 /** Signals that a requested resource does not exist (maps to HTTP 404). */
@@ -114,19 +186,16 @@ const EXTERNAL_FETCH_TIMEOUT_MS = parseInt(
 /**
  * Private IP range detector — returns true for addresses that must not be
  * reached by an operator-controlled URL parameter (SSRF mitigation).
+ * Uses module-level compiled regex constants — no per-call recompilation.
  */
 function isPrivateOrLoopbackIp(ip: string): boolean {
-  // IPv4 private / loopback / link-local / CGNAT ranges
-  const ipv4Private =
-    /^(127\.|10\.|192\.168\.|169\.254\.|0\.|100\.(6[4-9]|[7-9]\d|1([01]\d|2[0-7]))\.)/.test(ip);
-  // RFC1918 172.16.0.0/12 (172.16.x.x – 172.31.x.x)
-  const ipv4Rfc1918_172 = /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
-  // IPv6 loopback (::1), link-local (fe80::/10), and ULA (fc00::/7: fc** and fd**)
-  const ipv6Private =
+  return (
+    IPV4_PRIVATE_RE.test(ip) ||
+    IPV4_RFC1918_172_RE.test(ip) ||
     ip === "::1" ||
-    /^fe[89ab][0-9a-f]:/i.test(ip) ||
-    /^f[cd][0-9a-f]{2}:/i.test(ip);
-  return ipv4Private || ipv4Rfc1918_172 || ipv6Private;
+    IPV6_LINK_LOCAL_RE.test(ip) ||
+    IPV6_ULA_RE.test(ip)
+  );
 }
 
 /**
@@ -158,9 +227,10 @@ async function validateExternalUrl(rawUrl: string): Promise<URL> {
 
   // Resolve all addresses for the hostname and reject if any resolves to a
   // private/loopback IP (DNS rebinding / multi-A-record SSRF mitigation).
+  // Results are served from the in-process DNS cache (TTL: DNS_CACHE_TTL_MS).
   try {
-    const records = await dnsLookupAsync(hostname, { all: true, verbatim: true });
-    for (const { address } of records) {
+    const addresses = await resolveHostname(hostname);
+    for (const address of addresses) {
       if (isPrivateOrLoopbackIp(address)) {
         throw new Error(`Disallowed target IP for hostname ${hostname}: ${address}`);
       }
@@ -325,6 +395,7 @@ app.get("/health", (c) => {
     faceDetection: FaceDetector.isLoaded() ? "ready" : "loading",
     imageCache: imageCache.stats(),
     sourceCache: sourceCache.stats(),
+    dnsCache: { entries: dnsCache.size, ttlMs: DNS_CACHE_TTL_MS },
     inFlight: requestCoalescer.size,
   });
 });
