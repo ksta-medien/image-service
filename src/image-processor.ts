@@ -129,9 +129,12 @@ export class ImageProcessor {
   }
 
   /**
-   * Process the image with all parameters
+   * Process the image with all parameters.
+   * Returns the encoded buffer and the format that was actually used.
+   * The returned format may differ from params.fm when a fallback occurs
+   * (e.g. AVIF → WebP for wide images that would exceed Akamai's origin timeout).
    */
-  async process(params: ImageProcessingParams): Promise<Buffer> {
+  async process(params: ImageProcessingParams): Promise<{ buffer: Buffer; format: string }> {
     try {
       // Verify the image can be read and get metadata
       let metadata;
@@ -336,17 +339,40 @@ export class ImageProcessor {
       const format = params.fm || "jpg";
       const quality = params.q || 80;
 
+      // actualFormat tracks what we actually encode — may differ from `format`
+      // when an AVIF → WebP fallback is triggered below.
+      let actualFormat = format.toLowerCase();
+
       switch (format.toLowerCase()) {
-        case "avif":
-          // Default libaom speed is 4, which takes 8-12 s on a 2000 px image
-          // and causes Cloud Run 503s under load. Speed 6 cuts encode time to
-          // ~1-2 s with a negligible file-size increase (~5 %).
-          // Configurable via AVIF_SPEED env var (0 = best compression, 9 = fastest).
-          this.sharp = this.sharp.avif({
-            quality,
-            speed: parseInt(process.env.AVIF_SPEED ?? "8", 10),
-          });
+        case "avif": {
+          // libaom encode time scales roughly with pixel count.
+          // At speed=8 a 2000 px-wide image takes 8–12 s on 1 vCPU, which
+          // exceeds Akamai's origin timeout and produces a 503.
+          // For images wider than AVIF_MAX_WIDTH we fall back to WebP, which
+          // encodes in <100 ms at effort=1 and is cached by Akamai anyway.
+          // Configurable via AVIF_SPEED (0=best, 9=fastest) and
+          // AVIF_MAX_WIDTH (default 1200 px).
+          const avifMaxWidth = parseInt(process.env.AVIF_MAX_WIDTH ?? "1200", 10);
+          const outputWidth = finalWidth ?? 0;
+
+          if (outputWidth > avifMaxWidth) {
+            console.log(
+              `[AVIF→WebP fallback] w=${outputWidth} > AVIF_MAX_WIDTH=${avifMaxWidth}; ` +
+              `encoding as WebP to stay within origin timeout.`,
+            );
+            actualFormat = "webp";
+            this.sharp = this.sharp.webp({
+              quality,
+              effort: parseInt(process.env.WEBP_EFFORT ?? "1", 10),
+            });
+          } else {
+            this.sharp = this.sharp.avif({
+              quality,
+              speed: parseInt(process.env.AVIF_SPEED ?? "8", 10),
+            });
+          }
           break;
+        }
         case "webp":
           // effort: 0–6 (default 4). Lower = faster encode at cost of slightly
           // larger files. Since Akamai caches the result, encode speed matters
@@ -366,6 +392,7 @@ export class ImageProcessor {
         case "jpg":
         case "jpeg":
         default:
+          actualFormat = "jpg";
           this.sharp = this.sharp.jpeg({
             quality,
             progressive: true,
@@ -378,7 +405,7 @@ export class ImageProcessor {
           break;
       }
 
-      return await this.sharp.toBuffer();
+      return { buffer: await this.sharp.toBuffer(), format: actualFormat };
     } catch (error) {
       throw new Error(
         `Image processing failed: ${error instanceof Error ? error.message : "Unknown error"}`,

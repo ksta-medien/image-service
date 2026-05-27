@@ -275,14 +275,14 @@ async function handleImageRequest(
 
       // Process
       const processor = new ImageProcessor(imageBuffer);
-      const processedImage = await processor.process(params);
+      const { buffer: processedImage, format: actualFormat } = await processor.process(params);
       console.log(
-        `Successfully processed image: ${processedImage.length} bytes, format: ${params.fm || "jpg"}`,
+        `Successfully processed image: ${processedImage.length} bytes, format: ${actualFormat}`,
       );
 
-      const contentType = ImageProcessor.getMimeType(params.fm);
-      imageCache.set(cacheKey, processedImage as Buffer, contentType);
-      return { buffer: processedImage as Buffer, contentType };
+      const contentType = ImageProcessor.getMimeType(actualFormat);
+      imageCache.set(cacheKey, processedImage, contentType);
+      return { buffer: processedImage, contentType };
     });
 
     c.header("Content-Type", value.contentType);
