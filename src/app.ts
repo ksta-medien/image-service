@@ -416,7 +416,19 @@ app.get("/proxy", async (c) => {
     }
 
     const imageUrl = buildImageUrl(sourceUrl);
-    const response = await fetch(imageUrl);
+    const controller = new AbortController();
+    const timeoutHandle = setTimeout(() => controller.abort(), 10_000);
+    let response: globalThis.Response;
+    try {
+      response = await fetch(imageUrl, { signal: controller.signal });
+    } catch (err) {
+      if ((err as Error).name === "AbortError") {
+        return c.json({ error: "Proxy fetch timed out" }, 504);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
     if (!response.ok) {
       return c.json(
         { error: `Failed to fetch image: ${response.statusText}` },

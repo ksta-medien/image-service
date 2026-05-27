@@ -344,11 +344,18 @@ export class ImageProcessor {
           // Configurable via AVIF_SPEED env var (0 = best compression, 9 = fastest).
           this.sharp = this.sharp.avif({
             quality,
-            speed: parseInt(process.env.AVIF_SPEED ?? "6", 10),
+            speed: parseInt(process.env.AVIF_SPEED ?? "8", 10),
           });
           break;
         case "webp":
-          this.sharp = this.sharp.webp({ quality });
+          // effort: 0–6 (default 4). Lower = faster encode at cost of slightly
+          // larger files. Since Akamai caches the result, encode speed matters
+          // more than marginal byte savings — same rationale as mozjpeg: false.
+          // Configurable via WEBP_EFFORT env var.
+          this.sharp = this.sharp.webp({
+            quality,
+            effort: parseInt(process.env.WEBP_EFFORT ?? "1", 10),
+          });
           break;
         case "png":
           this.sharp = this.sharp.png({
