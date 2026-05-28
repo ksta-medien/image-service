@@ -345,20 +345,34 @@ export class ImageProcessor {
 
       switch (format.toLowerCase()) {
         case "avif": {
-          // libaom encode time scales roughly with pixel count.
-          // At speed=8 a 2000 px-wide image takes 8–12 s on 1 vCPU, which
+          // libaom encode time scales roughly with pixel count (width × height).
+          // At speed=8 a 2000 px-wide 16:9 image takes 8–12 s on 1 vCPU, which
           // exceeds Akamai's origin timeout and produces a 503.
-          // For images wider than AVIF_MAX_WIDTH we fall back to WebP, which
-          // encodes in <100 ms at effort=1 and is cached by Akamai anyway.
-          // Configurable via AVIF_SPEED (0=best, 9=fastest) and
-          // AVIF_MAX_WIDTH (default 1200 px).
-          const avifMaxWidth = parseInt(process.env.AVIF_MAX_WIDTH ?? "1200", 10);
-          const outputWidth = finalWidth ?? 0;
+          // Square or portrait images of the same *width* can have significantly
+          // more pixels — e.g. 1000×1000 (1 MP) encodes like a ~1340px-wide 16:9
+          // image and approaches the timeout under containerConcurrency=2.
+          //
+          // Two independent guards trigger the WebP fallback (OR condition):
+          //   AVIF_MAX_WIDTH  (default 1200) — catches wide landscape images
+          //   AVIF_MAX_PIXELS (default 810000) — catches square/portrait images
+          //     810 000 ≈ 1200×675 (16:9 equivalent of the width threshold)
+          //
+          // Both are configurable via env vars.
+          const avifMaxWidth  = parseInt(process.env.AVIF_MAX_WIDTH  ?? "1200",   10);
+          const avifMaxPixels = parseInt(process.env.AVIF_MAX_PIXELS ?? "810000", 10);
+          const outputWidth   = finalWidth  ?? 0;
+          const outputHeight  = finalHeight ?? outputWidth; // square fallback when h is unknown
+          const outputPixels  = outputWidth * outputHeight;
 
-          if (outputWidth > avifMaxWidth) {
+          const widthExceeded  = outputWidth  > avifMaxWidth;
+          const pixelsExceeded = outputPixels > avifMaxPixels;
+
+          if (widthExceeded || pixelsExceeded) {
+            const reason = widthExceeded
+              ? `w=${outputWidth} > AVIF_MAX_WIDTH=${avifMaxWidth}`
+              : `pixels=${outputPixels} > AVIF_MAX_PIXELS=${avifMaxPixels} (${outputWidth}×${outputHeight})`;
             console.log(
-              `[AVIF→WebP fallback] w=${outputWidth} > AVIF_MAX_WIDTH=${avifMaxWidth}; ` +
-              `encoding as WebP to stay within origin timeout.`,
+              `[AVIF→WebP fallback] ${reason}; encoding as WebP to stay within origin timeout.`,
             );
             actualFormat = "webp";
             this.sharp = this.sharp.webp({
