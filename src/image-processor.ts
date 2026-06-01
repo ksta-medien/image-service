@@ -11,6 +11,18 @@ import {
   computeFocalCrop,
 } from "./face-detector";
 
+/**
+ * Thrown when the source image is corrupt, truncated, or otherwise unreadable
+ * by libvips/Sharp. Callers should treat this as an unrecoverable data error
+ * (HTTP 422) and serve a fallback rather than a generic 500.
+ */
+export class CorruptImageError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "Corrupt or unreadable image");
+    this.name = "CorruptImageError";
+  }
+}
+
 export class ImageProcessor {
   private sharp: Sharp;
   private originalBuffer: Buffer;
@@ -421,8 +433,19 @@ export class ImageProcessor {
 
       return { buffer: await this.sharp.toBuffer(), format: actualFormat };
     } catch (error) {
+      // Distinguish corrupt/unreadable source images from unexpected errors.
+      // VipsJpeg/VipsPng/VipsWebp errors and metadata-read failures indicate
+      // a bad source file — callers can serve a fallback instead of a 500.
+      const msg = error instanceof Error ? error.message : "";
+      if (
+        msg.includes("Vips") ||
+        msg.includes("premature end") ||
+        msg.includes("Cannot read image metadata")
+      ) {
+        throw new CorruptImageError(error);
+      }
       throw new Error(
-        `Image processing failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+        `Image processing failed: ${msg || "Unknown error"}`,
       );
     }
   }

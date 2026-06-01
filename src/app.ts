@@ -5,7 +5,7 @@ import { Storage } from "@google-cloud/storage";
 import sharp from "sharp";
 import { lookup as dnsLookup } from "dns";
 import { promisify } from "util";
-import { ImageProcessor } from "./image-processor";
+import { ImageProcessor, CorruptImageError } from "./image-processor";
 import { FaceDetector } from "./face-detector";
 import { imageCache, buildCacheKey } from "./image-cache";
 import { sourceCache } from "./source-cache";
@@ -300,11 +300,21 @@ async function handleImageRequest(
       return c.body(buffer as unknown as string);
     }
 
-    console.error("Image processing error:", err);
+    if (err instanceof CorruptImageError) {
+      console.warn(`[422] Corrupt source image, returning fallback: ${imagePath} — ${err.message}`);
+      const { width, height } = resolveFallbackDimensions(params.w, params.h, params.ar);
+      const { buffer, contentType } = await renderFallback(width, height, params.fm);
+      c.header("Content-Type", contentType);
+      c.header("Cache-Control", "public, max-age=300");
+      c.status(422);
+      return c.body(buffer as unknown as string);
+    }
+
+    console.error("Unexpected image processing error:", err);
     console.error("Processing params:", JSON.stringify(params));
     return c.json(
       {
-        error: `Image processing failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+        error: err instanceof Error ? err.message : "Unknown error",
         params,
       },
       500,
