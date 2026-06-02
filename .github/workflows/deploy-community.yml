@@ -1,0 +1,198 @@
+name: Deploy Community to Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy manually"
+        required: true
+        type: choice
+        options:
+          - qa
+
+env:
+  REGION: europe-west3
+  PROJECT_ID_QA: kdm-community-qa
+  PROJECT_ID_LIVE: kdm-community-live
+  IMAGE_REGISTRY_QA: europe-west3-docker.pkg.dev/kdm-community-qa/image-service/image-service
+  IMAGE_REGISTRY_LIVE: europe-west3-docker.pkg.dev/kdm-community-live/image-service/image-service
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build: live  →  Image bauen und in Live-Projekt pushen
+  # ---------------------------------------------------------------------------
+  build-live:
+    name: Build (live)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (Live)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/649528461079/locations/global/workloadIdentityPools/github/providers/github-actions
+          service_account: github-cicd@kdm-community-live.iam.gserviceaccount.com
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker to use gcloud
+        run: gcloud auth configure-docker europe-west3-docker.pkg.dev
+
+      - name: Build and push Docker image
+        run: |
+          docker build \
+            -t ${{ env.IMAGE_REGISTRY_LIVE }}:${{ github.sha }} \
+            -t ${{ env.IMAGE_REGISTRY_LIVE }}:live-latest \
+            .
+          docker push ${{ env.IMAGE_REGISTRY_LIVE }}:${{ github.sha }}
+          docker push ${{ env.IMAGE_REGISTRY_LIVE }}:live-latest
+
+  # ---------------------------------------------------------------------------
+  # Deploy: live  →  1 Cloud Run Service
+  # ---------------------------------------------------------------------------
+  deploy-live:
+    name: Deploy (live)
+    runs-on: ubuntu-latest
+    needs: build-live
+
+    env:
+      SERVICE_NAME: image-service-live
+      GCS_BUCKET_NAME: community-uploads-live
+      GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/community-uploads-live
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authenticate to Google Cloud (Live)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/649528461079/locations/global/workloadIdentityPools/github/providers/github-actions
+          service_account: github-cicd@kdm-community-live.iam.gserviceaccount.com
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image ${{ env.IMAGE_REGISTRY_LIVE }}:${{ github.sha }} \
+            --platform managed \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID_LIVE }} \
+            --allow-unauthenticated \
+            --port 8080 \
+            --timeout 30 \
+            --set-env-vars="GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ env.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=512,SHARP_CONCURRENCY=2,AVIF_SPEED=6"
+
+      - name: Get service URL
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --platform managed \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID_LIVE }} \
+            --format 'value(status.url)')
+          echo "[live] ${{ env.SERVICE_NAME }} deployed to: $SERVICE_URL"
+
+  # ---------------------------------------------------------------------------
+  # Build: qa  →  Image bauen und in QA-Projekt pushen
+  # ---------------------------------------------------------------------------
+  build-qa:
+    name: Build (qa)
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.environment == 'qa')
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (QA)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/801356143061/locations/global/workloadIdentityPools/github/providers/github-actions
+          service_account: github-cicd@kdm-community-qa.iam.gserviceaccount.com
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker to use gcloud
+        run: gcloud auth configure-docker europe-west3-docker.pkg.dev
+
+      - name: Build and push Docker image
+        run: |
+          docker build \
+            -t ${{ env.IMAGE_REGISTRY_QA }}:${{ github.sha }} \
+            -t ${{ env.IMAGE_REGISTRY_QA }}:qa-latest \
+            .
+          docker push ${{ env.IMAGE_REGISTRY_QA }}:${{ github.sha }}
+          docker push ${{ env.IMAGE_REGISTRY_QA }}:qa-latest
+
+  # ---------------------------------------------------------------------------
+  # Deploy: qa  →  1 Cloud Run Service
+  # ---------------------------------------------------------------------------
+  deploy-qa:
+    name: Deploy image-service-qa (qa)
+    runs-on: ubuntu-latest
+    needs: build-qa
+
+    env:
+      SERVICE_NAME: image-service-qa
+      GCS_BUCKET_NAME: community-uploads-qa
+      GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/community-uploads-qa
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authenticate to Google Cloud (QA)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/801356143061/locations/global/workloadIdentityPools/github/providers/github-actions
+          service_account: github-cicd@kdm-community-qa.iam.gserviceaccount.com
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image ${{ env.IMAGE_REGISTRY_QA }}:${{ github.sha }} \
+            --platform managed \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID_QA }} \
+            --allow-unauthenticated \
+            --port 8080 \
+            --no-cpu-throttling \
+            --timeout 30 \
+            --set-env-vars="GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ env.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=512,SHARP_CONCURRENCY=2,AVIF_SPEED=6"
+
+      - name: Get service URL
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --platform managed \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID_QA }} \
+            --format 'value(status.url)')
+          echo "[qa] ${{ env.SERVICE_NAME }} deployed to: $SERVICE_URL"
+
