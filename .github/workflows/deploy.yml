@@ -79,7 +79,10 @@ jobs:
           - service: kr-image-service-live
             GCS_BUCKET_NAME: livingdocs-image-live
             GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/livingdocs-image-live
-          - service: exp-image-service-live  
+          - service: exp-image-service-live
+            GCS_BUCKET_NAME: livingdocs-image-live
+            GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/livingdocs-image-live
+          - service: li-image-service-live
             GCS_BUCKET_NAME: livingdocs-image-live
             GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/livingdocs-image-live
 
@@ -158,17 +161,23 @@ jobs:
           docker push ${{ env.IMAGE_REGISTRY }}:qa-latest
 
   # ---------------------------------------------------------------------------
-  # Deploy: qa  →  1 Cloud Run Service
+  # Deploy: qa  →  Cloud Run Services (Matrix)
   # ---------------------------------------------------------------------------
   deploy-qa:
-    name: Deploy image-service-qa (qa)
+    name: Deploy ${{ matrix.service }} (qa)
     runs-on: ubuntu-latest
     needs: build-qa
 
-    env:
-      SERVICE_NAME: image-service-qa
-      GCS_BUCKET_NAME: livingdocs-image-qa
-      GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/livingdocs-image-qa
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: image-service-qa
+            GCS_BUCKET_NAME: livingdocs-image-qa
+            GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/livingdocs-image-qa
+          - service: li-image-service-qa
+            GCS_BUCKET_NAME: livingdocs-image-qa
+            GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/livingdocs-image-qa
 
     permissions:
       contents: read
@@ -186,7 +195,7 @@ jobs:
 
       - name: Deploy to Cloud Run
         run: |
-          gcloud run deploy ${{ env.SERVICE_NAME }} \
+          gcloud run deploy ${{ matrix.service }} \
             --image ${{ env.IMAGE_REGISTRY }}:${{ github.sha }} \
             --platform managed \
             --region ${{ env.REGION }} \
@@ -195,16 +204,16 @@ jobs:
             --port 8080 \
             --no-cpu-throttling \
             --timeout 30 \
-            --set-env-vars="GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ env.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=512,SHARP_CONCURRENCY=2,AVIF_SPEED=6"
+            --set-env-vars="GCS_BUCKET_NAME=${{ matrix.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ matrix.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=512,SHARP_CONCURRENCY=2,AVIF_SPEED=6"
 
       - name: Get service URL
         run: |
-          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+          SERVICE_URL=$(gcloud run services describe ${{ matrix.service }} \
             --platform managed \
             --region ${{ env.REGION }} \
             --project ${{ env.PROJECT_ID }} \
             --format 'value(status.url)')
-          echo "[qa] ${{ env.SERVICE_NAME }} deployed to: $SERVICE_URL"
+          echo "[qa] ${{ matrix.service }} deployed to: $SERVICE_URL"
 
   # ---------------------------------------------------------------------------
   # Deploy: Dev  →  1 Cloud Run Service
