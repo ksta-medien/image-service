@@ -8,7 +8,8 @@
     "start": "bun run index.ts",
     "dev": "bun --watch index.ts",
     "build": "bun build index.ts --outdir ./dist --target bun",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bunx tsc --noEmit",
+    "setup": "bash scripts/download-models.sh"
   },
   "keywords": [
     "image-processing",
@@ -29,12 +30,11 @@
   "dependencies": {
     "@google-cloud/storage": "^7.14.0",
     "@hono/node-server": "^1.19.11",
-    "@tensorflow-models/coco-ssd": "^2.2.3",
-    "@tensorflow-models/face-detection": "^1.0.3",
-    "@tensorflow/tfjs-backend-wasm": "^4.22.0",
-    "@tensorflow/tfjs-converter": "^4.22.0",
-    "@tensorflow/tfjs-core": "^4.22.0",
     "hono": "^4.12.9",
+    "onnxruntime-node": "^1.20.1",
     "sharp": "^0.34.5"
-  }
+  },
+  "trustedDependencies": [
+    "onnxruntime-node"
+  ]
 }

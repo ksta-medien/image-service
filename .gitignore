@@ -173,3 +173,6 @@ dist
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# ONNX model binaries (downloaded via scripts/download-models.sh)
+models/*.onnx

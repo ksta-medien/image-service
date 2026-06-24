@@ -139,6 +139,20 @@ Then use paths directly in your components:
 bun install
 ```
 
+### Download ML models
+
+The face detection pipeline requires two ONNX models that are not committed to the repo (~10 MB total). Download them once with:
+
+```bash
+bun run setup
+```
+
+This fetches:
+- **UltraFace RFB-320** — primary face detector (~1.2 MB)
+- **MoveNet Lightning** — pose-based fallback for turned-away persons (~9 MB)
+
+The service starts without the models but face-aware cropping (`crop=faces`) will silently fall back to entropy cropping until they are present.
+
 ### Run locally
 
 ```bash
