@@ -216,19 +216,14 @@ jobs:
           echo "[qa] ${{ matrix.service }} deployed to: $SERVICE_URL"
 
   # ---------------------------------------------------------------------------
-  # Deploy: Dev  →  1 Cloud Run Service
+  # Build: dev  →  build the image once, then deploy it to both services
   # ---------------------------------------------------------------------------
-  deploy-dev:
-    name: Deploy image-service-dev (dev)
+  build-dev:
+    name: Build (dev)
     runs-on: ubuntu-latest
     if: >
       github.event_name == 'pull_request' ||
       (github.event_name == 'workflow_dispatch' && inputs.environment == 'dev')
-
-    env:
-      SERVICE_NAME: image-service-dev
-      GCS_BUCKET_NAME: livingdocs-image-dev
-      GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/livingdocs-image-dev
 
     permissions:
       contents: read
@@ -259,22 +254,60 @@ jobs:
           docker push ${{ env.IMAGE_REGISTRY }}:${{ github.sha }}
           docker push ${{ env.IMAGE_REGISTRY }}:dev-latest
 
+  # ---------------------------------------------------------------------------
+  # Deploy: dev  →  Cloud Run Services (Matrix)
+  #   - image-service-dev     : general / delivery-frontend dev instance
+  #   - li-image-service-dev  : Livingdocs editor dev instance
+  #     (mirrors the QA matrix; both read the livingdocs-image-dev bucket)
+  # ---------------------------------------------------------------------------
+  deploy-dev:
+    name: Deploy ${{ matrix.service }} (dev)
+    runs-on: ubuntu-latest
+    needs: build-dev
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: image-service-dev
+            GCS_BUCKET_NAME: livingdocs-image-dev
+            GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/livingdocs-image-dev
+          - service: li-image-service-dev
+            GCS_BUCKET_NAME: livingdocs-image-dev
+            GCS_BUCKET_BASE_URL: https://storage.cloud.google.com/livingdocs-image-dev
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/734680744363/locations/global/workloadIdentityPools/github-pool/providers/github-pool
+          service_account: github-ksta-medien@dmx-case42.iam.gserviceaccount.com
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
       - name: Deploy to Cloud Run
         run: |
-          gcloud run deploy ${{ env.SERVICE_NAME }} \
+          gcloud run deploy ${{ matrix.service }} \
             --image ${{ env.IMAGE_REGISTRY }}:${{ github.sha }} \
             --platform managed \
             --region ${{ env.REGION }} \
             --project ${{ env.PROJECT_ID }} \
             --allow-unauthenticated \
             --port 8080 \
-            --set-env-vars="GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ env.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=512,SHARP_CONCURRENCY=4,AVIF_SPEED=8"
+            --no-cpu-throttling \
+            --timeout 30 \
+            --set-env-vars="GCS_BUCKET_NAME=${{ matrix.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ matrix.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=512,SHARP_CONCURRENCY=4,AVIF_SPEED=8"
 
       - name: Get service URL
         run: |
-          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+          SERVICE_URL=$(gcloud run services describe ${{ matrix.service }} \
             --platform managed \
             --region ${{ env.REGION }} \
             --project ${{ env.PROJECT_ID }} \
             --format 'value(status.url)')
-          echo "[dev] ${{ env.SERVICE_NAME }} deployed to: $SERVICE_URL"
+          echo "[dev] ${{ matrix.service }} deployed to: $SERVICE_URL"
