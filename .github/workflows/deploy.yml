@@ -300,6 +300,7 @@ jobs:
             --allow-unauthenticated \
             --port 8080 \
             --no-cpu-throttling \
+            --timeout 30 \
             --set-env-vars="GCS_BUCKET_NAME=${{ matrix.GCS_BUCKET_NAME }},GCS_BUCKET_BASE_URL=${{ matrix.GCS_BUCKET_BASE_URL }},IMAGE_CACHE_MAX_MB=512,SHARP_CONCURRENCY=4,AVIF_SPEED=8"
 
       - name: Get service URL
